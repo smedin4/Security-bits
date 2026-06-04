@@ -87,3 +87,9 @@ The pipeline writes Parquet files below the configured target root path using th
 ```text
 <table-root>/table=<container>/year=<yyyy>/month=<MM>/day=<dd>/hour=<HH>/batch=<runId>
 ```
+
+## Troubleshooting
+
+If the copy activity fails with `TypeConversionConnectorNotSupported` and mentions `JsonPathV2`, redeploy the latest template. JSON source files are treated as hierarchical data by Data Factory, and ADF type conversion is supported only for tabular data shapes. This template keeps the JSON-to-Parquet copy translator minimal so Data Factory does not enable unsupported type conversion for the JSON source.
+
+If a later run fails with an authorization error, confirm the Data Factory managed identity has the post-deployment RBAC assignments above. For ADLS Gen2 accounts with hierarchical namespace ACLs, also confirm the identity has execute permission on parent folders and write permission on the target path.

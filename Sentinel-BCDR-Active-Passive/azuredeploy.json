@@ -270,12 +270,7 @@
               },
               "enableStaging": false,
               "translator": {
-                "type": "TabularTranslator",
-                "typeConversion": true,
-                "typeConversionSettings": {
-                  "allowDataTruncation": true,
-                  "treatBooleanAsNumber": false
-                }
+                "type": "TabularTranslator"
               }
             },
             "inputs": [
@@ -473,7 +468,8 @@
           "target"
         ],
         "typeProperties": {
-          "url": "[parameters('targetStorageAccountUrl')]"
+          "url": "[parameters('targetStorageAccountUrl')]",
+          "authenticationType": "MSI"
         }
       },
       "dependsOn": [

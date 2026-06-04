@@ -264,8 +264,7 @@
                   "type": "AzureBlobFSWriteSettings"
                 },
                 "formatSettings": {
-                  "type": "ParquetWriteSettings",
-                  "fileNamePrefix": "@pipeline().parameters.runId"
+                  "type": "ParquetWriteSettings"
                 }
               },
               "enableStaging": false,

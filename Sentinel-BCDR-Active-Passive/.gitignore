@@ -1,0 +1,3 @@
+# Local deployment parameter files with real environment values
+azuredeploy.parameters.json
+*.local.parameters.json

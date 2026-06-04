@@ -1,6 +1,6 @@
 # Sentinel BCDR Active/Passive ADF Deployment
 
-[![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2F%3CGITHUB-OWNER%3E%2FSecurity-bits%2Fmain%2Fsentinel-bcdr-active-passive-adf%2Fazuredeploy.json)
+[![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2Fsmedin4%2FSecurity-bits%2Fmain%2FSentinel-BCDR-Active-Passive%2Fazuredeploy.json)
 
 This mini-project deploys an Azure Data Factory pipeline that copies Azure Monitor Data Export blobs from a source storage account into static Snappy-compressed Parquet files in a target ADLS Gen2 account.
 
@@ -87,7 +87,3 @@ The pipeline writes Parquet files below the configured target root path using th
 ```text
 <table-root>/table=<container>/year=<yyyy>/month=<MM>/day=<dd>/hour=<HH>/batch=<runId>
 ```
-
-## Publishing Notes
-
-Before publishing to Security-bits, replace `<GITHUB-OWNER>` in the Deploy to Azure button URL with the GitHub owner or organization that hosts the repository.

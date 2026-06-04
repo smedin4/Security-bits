@@ -1,0 +1,617 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.43.8.12551",
+      "templateHash": "4631119712157295407"
+    }
+  },
+  "parameters": {
+    "dataFactoryName": {
+      "type": "string",
+      "metadata": {
+        "description": "Azure Data Factory name."
+      }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]",
+      "metadata": {
+        "description": "Azure region for the Data Factory."
+      }
+    },
+    "sourceStorageAccountUrl": {
+      "type": "string",
+      "metadata": {
+        "description": "Source Azure Monitor export blob service URL, for example https://<source-storage-account>.blob.core.windows.net."
+      }
+    },
+    "sourceStorageAccountResourceId": {
+      "type": "string",
+      "metadata": {
+        "description": "Azure Resource Manager ID of the source storage account, used by ADF to list containers generically."
+      }
+    },
+    "targetStorageAccountUrl": {
+      "type": "string",
+      "metadata": {
+        "description": "Target ADLS Gen2 account URL, for example https://<account>.dfs.core.windows.net."
+      }
+    },
+    "targetFileSystem": {
+      "type": "string",
+      "defaultValue": "sentinel-bcdr",
+      "metadata": {
+        "description": "Target ADLS Gen2 file system/container name."
+      }
+    },
+    "targetRootPath": {
+      "type": "string",
+      "defaultValue": "sentinel-bcdr",
+      "metadata": {
+        "description": "Target root path below the file system."
+      }
+    },
+    "sourceContainerPrefix": {
+      "type": "string",
+      "defaultValue": "am-",
+      "metadata": {
+        "description": "Source container prefix. Azure Monitor export containers normally start with am-."
+      }
+    },
+    "sourceWildcardFolderPath": {
+      "type": "string",
+      "defaultValue": "WorkspaceResourceId=*",
+      "metadata": {
+        "description": "Default wildcard folder path below each source container."
+      }
+    },
+    "sourceFilePattern": {
+      "type": "string",
+      "defaultValue": "PT5M*.json",
+      "metadata": {
+        "description": "Source file pattern for Azure Monitor export blobs."
+      }
+    },
+    "triggerFrequency": {
+      "type": "string",
+      "defaultValue": "Hour",
+      "allowedValues": [
+        "Minute",
+        "Hour",
+        "Day",
+        "Week"
+      ],
+      "metadata": {
+        "description": "Default schedule trigger frequency."
+      }
+    },
+    "triggerInterval": {
+      "type": "int",
+      "defaultValue": 1,
+      "minValue": 1,
+      "metadata": {
+        "description": "Default schedule trigger interval."
+      }
+    },
+    "triggerStartTimeUtc": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "UTC schedule start time. Leave empty to skip trigger creation until parameters are finalized."
+      }
+    },
+    "processingDelayHours": {
+      "type": "int",
+      "defaultValue": 1,
+      "minValue": 0,
+      "metadata": {
+        "description": "Hours to wait before processing. The default processes the previous complete hour."
+      }
+    },
+    "maxConcurrentContainers": {
+      "type": "int",
+      "defaultValue": 8,
+      "minValue": 1,
+      "maxValue": 50,
+      "metadata": {
+        "description": "Maximum parallel container exports in the master pipeline."
+      }
+    },
+    "logAnalyticsWorkspaceId": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Optional Log Analytics workspace resource ID for ADF diagnostics."
+      }
+    },
+    "tags": {
+      "type": "object",
+      "defaultValue": {},
+      "metadata": {
+        "description": "Resource tags."
+      }
+    }
+  },
+  "variables": {
+    "$fxv#0": {
+      "name": "ds_source_monitor_json_lines",
+      "properties": {
+        "linkedServiceName": {
+          "referenceName": "ls_source_monitor_export_blob",
+          "type": "LinkedServiceReference"
+        },
+        "parameters": {
+          "containerName": {
+            "type": "String"
+          }
+        },
+        "type": "Json",
+        "typeProperties": {
+          "location": {
+            "type": "AzureBlobStorageLocation",
+            "container": "@dataset().containerName"
+          }
+        },
+        "annotations": [
+          "sentinel-bcdr"
+        ]
+      }
+    },
+    "$fxv#1": {
+      "name": "ds_target_static_parquet",
+      "properties": {
+        "linkedServiceName": {
+          "referenceName": "ls_target_bcdr_adlsgen2",
+          "type": "LinkedServiceReference"
+        },
+        "parameters": {
+          "folderPath": {
+            "type": "String"
+          }
+        },
+        "type": "Parquet",
+        "typeProperties": {
+          "location": {
+            "type": "AzureBlobFSLocation",
+            "fileSystem": "sentinel-bcdr",
+            "folderPath": "@dataset().folderPath"
+          },
+          "compressionCodec": "snappy"
+        },
+        "annotations": [
+          "sentinel-bcdr"
+        ]
+      }
+    },
+    "$fxv#2": {
+      "name": "pl_copy_monitor_container_window",
+      "properties": {
+        "description": "Copy one Azure Monitor export container/window from JSON-lines to static Snappy Parquet.",
+        "parameters": {
+          "containerName": {
+            "type": "String"
+          },
+          "modifiedAfterUtc": {
+            "type": "String"
+          },
+          "modifiedBeforeUtc": {
+            "type": "String"
+          },
+          "sourceFolderPath": {
+            "type": "String",
+            "defaultValue": "WorkspaceResourceId=*"
+          },
+          "sourceFilePattern": {
+            "type": "String",
+            "defaultValue": "PT5M*.json"
+          },
+          "targetRootPath": {
+            "type": "String",
+            "defaultValue": "sentinel-bcdr"
+          },
+          "runId": {
+            "type": "String",
+            "defaultValue": "@pipeline().RunId"
+          }
+        },
+        "activities": [
+          {
+            "name": "CopyJsonLinesToParquet",
+            "type": "Copy",
+            "dependsOn": [],
+            "policy": {
+              "timeout": "7.00:00:00",
+              "retry": 2,
+              "retryIntervalInSeconds": 120,
+              "secureOutput": false,
+              "secureInput": false
+            },
+            "typeProperties": {
+              "source": {
+                "type": "JsonSource",
+                "storeSettings": {
+                  "type": "AzureBlobStorageReadSettings",
+                  "recursive": true,
+                  "wildcardFolderPath": "@pipeline().parameters.sourceFolderPath",
+                  "wildcardFileName": "@pipeline().parameters.sourceFilePattern",
+                  "modifiedDatetimeStart": "@pipeline().parameters.modifiedAfterUtc",
+                  "modifiedDatetimeEnd": "@pipeline().parameters.modifiedBeforeUtc"
+                },
+                "formatSettings": {
+                  "type": "JsonReadSettings"
+                },
+                "additionalColumns": [
+                  {
+                    "name": "_SourceContainer",
+                    "value": "@pipeline().parameters.containerName"
+                  },
+                  {
+                    "name": "_AdfPipelineRunId",
+                    "value": "@pipeline().RunId"
+                  },
+                  {
+                    "name": "_ProcessedUtc",
+                    "value": "@utcNow()"
+                  }
+                ]
+              },
+              "sink": {
+                "type": "ParquetSink",
+                "storeSettings": {
+                  "type": "AzureBlobFSWriteSettings"
+                },
+                "formatSettings": {
+                  "type": "ParquetWriteSettings",
+                  "fileNamePrefix": "@pipeline().parameters.runId"
+                }
+              },
+              "enableStaging": false,
+              "translator": {
+                "type": "TabularTranslator",
+                "typeConversion": true,
+                "typeConversionSettings": {
+                  "allowDataTruncation": true,
+                  "treatBooleanAsNumber": false
+                }
+              }
+            },
+            "inputs": [
+              {
+                "referenceName": "ds_source_monitor_json_lines",
+                "type": "DatasetReference",
+                "parameters": {
+                  "containerName": "@pipeline().parameters.containerName"
+                }
+              }
+            ],
+            "outputs": [
+              {
+                "referenceName": "ds_target_static_parquet",
+                "type": "DatasetReference",
+                "parameters": {
+                  "folderPath": "@concat(pipeline().parameters.targetRootPath, '/table=', pipeline().parameters.containerName, '/year=', formatDateTime(pipeline().parameters.modifiedAfterUtc, 'yyyy'), '/month=', formatDateTime(pipeline().parameters.modifiedAfterUtc, 'MM'), '/day=', formatDateTime(pipeline().parameters.modifiedAfterUtc, 'dd'), '/hour=', formatDateTime(pipeline().parameters.modifiedAfterUtc, 'HH'), '/batch=', pipeline().parameters.runId)"
+                }
+              }
+            ]
+          }
+        ],
+        "annotations": [
+          "sentinel-bcdr",
+          "static-parquet"
+        ]
+      }
+    },
+    "$fxv#3": {
+      "name": "pl_discover_and_export_azmon_to_parquet",
+      "properties": {
+        "description": "Discover matching Azure Monitor export containers through Azure Resource Manager and export the previous processing window to static Snappy Parquet.",
+        "parameters": {
+          "sourceStorageAccountResourceId": {
+            "type": "String"
+          },
+          "sourceContainerPrefix": {
+            "type": "String",
+            "defaultValue": "am-"
+          },
+          "processingDelayHours": {
+            "type": "Int",
+            "defaultValue": 1
+          },
+          "modifiedAfterUtc": {
+            "type": "String",
+            "defaultValue": ""
+          },
+          "modifiedBeforeUtc": {
+            "type": "String",
+            "defaultValue": ""
+          },
+          "sourceFolderPath": {
+            "type": "String",
+            "defaultValue": "WorkspaceResourceId=*"
+          },
+          "sourceFilePattern": {
+            "type": "String",
+            "defaultValue": "PT5M*.json"
+          },
+          "targetRootPath": {
+            "type": "String",
+            "defaultValue": "sentinel-bcdr"
+          },
+          "maxConcurrentContainers": {
+            "type": "Int",
+            "defaultValue": 8
+          }
+        },
+        "activities": [
+          {
+            "name": "ListSourceContainers",
+            "type": "WebActivity",
+            "dependsOn": [],
+            "policy": {
+              "timeout": "0.00:02:00",
+              "retry": 2,
+              "retryIntervalInSeconds": 30,
+              "secureOutput": false,
+              "secureInput": false
+            },
+            "typeProperties": {
+              "method": "GET",
+              "url": "@concat('https://management.azure.com', pipeline().parameters.sourceStorageAccountResourceId, '/blobServices/default/containers?api-version=2023-01-01')",
+              "authentication": {
+                "type": "MSI",
+                "resource": "https://management.azure.com/"
+              }
+            }
+          },
+          {
+            "name": "FilterMatchingContainers",
+            "type": "Filter",
+            "dependsOn": [
+              {
+                "activity": "ListSourceContainers",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "typeProperties": {
+              "items": "@activity('ListSourceContainers').output.value",
+              "condition": "@startswith(item().name, pipeline().parameters.sourceContainerPrefix)"
+            }
+          },
+          {
+            "name": "ForEachMatchingContainer",
+            "type": "ForEach",
+            "dependsOn": [
+              {
+                "activity": "FilterMatchingContainers",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "typeProperties": {
+              "items": "@activity('FilterMatchingContainers').output.value",
+              "isSequential": false,
+              "batchCount": 8,
+              "activities": [
+                {
+                  "name": "CopyContainerWindow",
+                  "type": "ExecutePipeline",
+                  "dependsOn": [],
+                  "typeProperties": {
+                    "pipeline": {
+                      "referenceName": "pl_copy_monitor_container_window",
+                      "type": "PipelineReference"
+                    },
+                    "waitOnCompletion": true,
+                    "parameters": {
+                      "containerName": "@item().name",
+                      "modifiedAfterUtc": "@if(equals(pipeline().parameters.modifiedAfterUtc, ''), formatDateTime(addHours(utcNow(), mul(-1, add(pipeline().parameters.processingDelayHours, 1))), 'yyyy-MM-ddTHH:00:00Z'), pipeline().parameters.modifiedAfterUtc)",
+                      "modifiedBeforeUtc": "@if(equals(pipeline().parameters.modifiedBeforeUtc, ''), formatDateTime(addHours(utcNow(), mul(-1, pipeline().parameters.processingDelayHours)), 'yyyy-MM-ddTHH:00:00Z'), pipeline().parameters.modifiedBeforeUtc)",
+                      "sourceFolderPath": "@pipeline().parameters.sourceFolderPath",
+                      "sourceFilePattern": "@pipeline().parameters.sourceFilePattern",
+                      "targetRootPath": "@pipeline().parameters.targetRootPath",
+                      "runId": "@pipeline().RunId"
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "annotations": [
+          "sentinel-bcdr",
+          "runtime-discovery"
+        ]
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.DataFactory/factories",
+      "apiVersion": "2018-06-01",
+      "name": "[parameters('dataFactoryName')]",
+      "location": "[parameters('location')]",
+      "tags": "[parameters('tags')]",
+      "identity": {
+        "type": "SystemAssigned"
+      },
+      "properties": {}
+    },
+    {
+      "type": "Microsoft.DataFactory/factories/linkedservices",
+      "apiVersion": "2018-06-01",
+      "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'ls_source_monitor_export_blob')]",
+      "properties": {
+        "type": "AzureBlobStorage",
+        "annotations": [
+          "sentinel-bcdr",
+          "source"
+        ],
+        "typeProperties": {
+          "serviceEndpoint": "[parameters('sourceStorageAccountUrl')]",
+          "accountKind": "StorageV2",
+          "authenticationType": "MSI"
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.DataFactory/factories/linkedservices",
+      "apiVersion": "2018-06-01",
+      "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'ls_target_bcdr_adlsgen2')]",
+      "properties": {
+        "type": "AzureBlobFS",
+        "annotations": [
+          "sentinel-bcdr",
+          "target"
+        ],
+        "typeProperties": {
+          "url": "[parameters('targetStorageAccountUrl')]"
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.DataFactory/factories/datasets",
+      "apiVersion": "2018-06-01",
+      "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'ds_source_monitor_json_lines')]",
+      "properties": "[variables('$fxv#0').properties]",
+      "dependsOn": [
+        "[resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName'))]",
+        "[resourceId('Microsoft.DataFactory/factories/linkedservices', parameters('dataFactoryName'), 'ls_source_monitor_export_blob')]"
+      ]
+    },
+    {
+      "type": "Microsoft.DataFactory/factories/datasets",
+      "apiVersion": "2018-06-01",
+      "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'ds_target_static_parquet')]",
+      "properties": "[union(variables('$fxv#1').properties, createObject('typeProperties', createObject('location', createObject('type', 'AzureBlobFSLocation', 'fileSystem', parameters('targetFileSystem'), 'folderPath', '@dataset().folderPath'), 'compressionCodec', 'snappy')))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName'))]",
+        "[resourceId('Microsoft.DataFactory/factories/linkedservices', parameters('dataFactoryName'), 'ls_target_bcdr_adlsgen2')]"
+      ]
+    },
+    {
+      "type": "Microsoft.DataFactory/factories/pipelines",
+      "apiVersion": "2018-06-01",
+      "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'pl_copy_monitor_container_window')]",
+      "properties": "[variables('$fxv#2').properties]",
+      "dependsOn": [
+        "[resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName'))]",
+        "[resourceId('Microsoft.DataFactory/factories/datasets', parameters('dataFactoryName'), 'ds_source_monitor_json_lines')]",
+        "[resourceId('Microsoft.DataFactory/factories/datasets', parameters('dataFactoryName'), 'ds_target_static_parquet')]"
+      ]
+    },
+    {
+      "type": "Microsoft.DataFactory/factories/pipelines",
+      "apiVersion": "2018-06-01",
+      "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'pl_discover_and_export_azmon_to_parquet')]",
+      "properties": "[variables('$fxv#3').properties]",
+      "dependsOn": [
+        "[resourceId('Microsoft.DataFactory/factories/pipelines', parameters('dataFactoryName'), 'pl_copy_monitor_container_window')]",
+        "[resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName'))]"
+      ]
+    },
+    {
+      "condition": "[not(empty(parameters('triggerStartTimeUtc')))]",
+      "type": "Microsoft.DataFactory/factories/triggers",
+      "apiVersion": "2018-06-01",
+      "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'tr_hourly_discover_and_export_azmon_to_parquet')]",
+      "properties": {
+        "annotations": [
+          "sentinel-bcdr"
+        ],
+        "pipelines": [
+          {
+            "pipelineReference": {
+              "referenceName": "pl_discover_and_export_azmon_to_parquet",
+              "type": "PipelineReference"
+            },
+            "parameters": {
+              "sourceStorageAccountResourceId": "[parameters('sourceStorageAccountResourceId')]",
+              "sourceContainerPrefix": "[parameters('sourceContainerPrefix')]",
+              "processingDelayHours": "[parameters('processingDelayHours')]",
+              "sourceFolderPath": "[parameters('sourceWildcardFolderPath')]",
+              "sourceFilePattern": "[parameters('sourceFilePattern')]",
+              "targetRootPath": "[parameters('targetRootPath')]",
+              "maxConcurrentContainers": "[parameters('maxConcurrentContainers')]"
+            }
+          }
+        ],
+        "type": "ScheduleTrigger",
+        "typeProperties": {
+          "recurrence": {
+            "frequency": "[parameters('triggerFrequency')]",
+            "interval": "[parameters('triggerInterval')]",
+            "startTime": "[parameters('triggerStartTimeUtc')]",
+            "timeZone": "UTC"
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName'))]",
+        "[resourceId('Microsoft.DataFactory/factories/pipelines', parameters('dataFactoryName'), 'pl_discover_and_export_azmon_to_parquet')]"
+      ]
+    },
+    {
+      "condition": "[not(empty(parameters('logAnalyticsWorkspaceId')))]",
+      "type": "Microsoft.Insights/diagnosticSettings",
+      "apiVersion": "2021-05-01-preview",
+      "scope": "[resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName'))]",
+      "name": "send-to-log-analytics",
+      "properties": {
+        "workspaceId": "[parameters('logAnalyticsWorkspaceId')]",
+        "logs": [
+          {
+            "category": "PipelineRuns",
+            "enabled": true
+          },
+          {
+            "category": "TriggerRuns",
+            "enabled": true
+          },
+          {
+            "category": "ActivityRuns",
+            "enabled": true
+          }
+        ],
+        "metrics": [
+          {
+            "category": "AllMetrics",
+            "enabled": true
+          }
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName'))]"
+      ]
+    }
+  ],
+  "outputs": {
+    "dataFactoryResourceId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName'))]"
+    },
+    "dataFactoryPrincipalId": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName')), '2018-06-01', 'full').identity.principalId]"
+    },
+    "sourceStorageRoleRequired": {
+      "type": "string",
+      "value": "Grant Reader plus Storage Blob Data Reader to the Data Factory managed identity on the source storage account. Reader is needed for ARM container discovery."
+    },
+    "targetStorageRoleRequired": {
+      "type": "string",
+      "value": "Grant Storage Blob Data Contributor to the Data Factory managed identity on the target ADLS Gen2 account or file system."
+    }
+  }
+}

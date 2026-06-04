@@ -1,0 +1,60 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "dataFactoryName": {
+      "value": "<data-factory-name>"
+    },
+    "location": {
+      "value": "<azure-region>"
+    },
+    "sourceStorageAccountUrl": {
+      "value": "https://<source-storage-account>.blob.core.windows.net"
+    },
+    "sourceStorageAccountResourceId": {
+      "value": "/subscriptions/<subscription-id>/resourceGroups/<source-resource-group>/providers/Microsoft.Storage/storageAccounts/<source-storage-account>"
+    },
+    "targetStorageAccountUrl": {
+      "value": "https://<target-storage-account>.dfs.core.windows.net"
+    },
+    "targetFileSystem": {
+      "value": "sentinel-bcdr"
+    },
+    "targetRootPath": {
+      "value": "sentinel-bcdr"
+    },
+    "sourceContainerPrefix": {
+      "value": "am-"
+    },
+    "sourceWildcardFolderPath": {
+      "value": "WorkspaceResourceId=*"
+    },
+    "sourceFilePattern": {
+      "value": "PT5M*.json"
+    },
+    "triggerFrequency": {
+      "value": "Hour"
+    },
+    "triggerInterval": {
+      "value": 1
+    },
+    "triggerStartTimeUtc": {
+      "value": ""
+    },
+    "processingDelayHours": {
+      "value": 1
+    },
+    "maxConcurrentContainers": {
+      "value": 8
+    },
+    "logAnalyticsWorkspaceId": {
+      "value": ""
+    },
+    "tags": {
+      "value": {
+        "workload": "sentinel-bcdr",
+        "environment": "<environment-name>"
+      }
+    }
+  }
+}

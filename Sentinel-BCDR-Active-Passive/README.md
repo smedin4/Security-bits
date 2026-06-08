@@ -60,9 +60,7 @@ Copy `azuredeploy.parameters.example.json` to `azuredeploy.parameters.json` befo
 | `triggerInterval` | No | Schedule trigger interval. Must be at least `1`. | `1` |
 | `triggerStartTimeUtc` | No | UTC start time for the schedule trigger. Leave empty to skip trigger creation. | `2026-06-04T00:00:00Z` |
 | `processingDelayHours` | No | Hours to wait before processing. Default processes the previous complete hour. | `1` |
-| `maxConcurrentContainers` | No | Maximum parallel source containers processed by the master pipeline. Valid range: `1` to `50`. | `8` |
-| `hourlyTables` | No | Comma-separated source container names to partition by hour instead of day. All other tables use day partitioning. | `am-microsoftgraphactivitylogs,am-azurediagnostics` |
-| `maxRowsPerFile` | No | Maximum rows per output Parquet file to cap file size for high-volume tables. Tiny tables stay in one file. | `1000000` |
+| `hourlyTables` | No | Comma-separated source container names to partition by hour instead of day. All other tables use day partitioning. Use the full container name including the `am-` prefix. | `am-microsoftgraphactivitylogs,am-azurediagnostics` |
 | `logAnalyticsWorkspaceId` | No | Optional Log Analytics workspace resource ID for Data Factory diagnostics. Leave empty to disable diagnostics. | `/subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.OperationalInsights/workspaces/<workspace-name>` |
 | `tags` | No | Tags applied to the Data Factory. | `{ "workload": "sentinel-bcdr" }` |
 
@@ -84,16 +82,18 @@ The `Reader` role is required on the source storage account so the master pipeli
 
 ## Output Layout
 
-Each source container becomes a top-level table folder directly under the target file system, with Hive-style date partitions. This matches what the Sentinel data lake federation connector discovers (one folder per table).
+Each source container becomes a top-level table folder directly under the target file system, with Hive-style date partitions. This matches what the Sentinel data lake federation connector discovers (one folder per table). The `sourceContainerPrefix` (default `am-`) is stripped from the folder name, so the `am-signinlogs` container is written as the `signinlogs` table folder.
 
 By default, tables are partitioned by day. Containers listed in `hourlyTables` are partitioned by hour instead, which improves time-range pruning for very high-volume tables.
 
 ```text
-[<targetRootPath>/]<container>/year=<yyyy>/month=<MM>/day=<dd>/[hour=<HH>/]<file>.parquet
+[<targetRootPath>/]<table>/year=<yyyy>/month=<MM>/day=<dd>/[hour=<HH>/]<file>.parquet
 ```
 
-- Day-partitioned (default): `<container>/year=2026/month=06/day=08/<file>.parquet`
-- Hour-partitioned (listed in `hourlyTables`): `<container>/year=2026/month=06/day=08/hour=05/<file>.parquet`
+Here `<table>` is the source container name with the `am-` prefix removed.
+
+- Day-partitioned (default): `signinlogs/year=2026/month=06/day=08/<file>.parquet`
+- Hour-partitioned (listed in `hourlyTables`): `signinlogs/year=2026/month=06/day=08/hour=05/<file>.parquet`
 
 Leave `targetRootPath` empty so the container is the top-level table folder. A non-empty `targetRootPath` adds a prefix that the federation connector does not expect.
 
@@ -110,9 +110,13 @@ The pipeline runs hourly, so the number of files is the same whether you partiti
 - Day partitioning: fewer folders, coarser time pruning. Good default for most tables.
 - Hour partitioning: more folders, finer time pruning. Use `hourlyTables` for very high-volume tables (for example, a table approaching hundreds of GB per day) so time-bounded queries scan one hour instead of a whole day.
 
-Individual Parquet file size is controlled by `maxRowsPerFile`, not by the partition granularity. Set it to cap file size in the 0.5-1 GB range for large tables. Tiny tables never reach the cap and stay in a single file.
+Individual Parquet file size is bounded by the source export window, not by a row cap. Azure Monitor continuous export writes one `PT5M` blob per five-minute window, and the copy uses `FlattenHierarchy`, so each source blob becomes one auto-named Parquet file. Even the largest tables (hundreds of GB/day) produce sub-gigabyte Parquet files per window, which keeps file sizes in the efficient range without any row-count setting. (`maxRowsPerFile` is intentionally not set: Data Factory rejects it together with `FlattenHierarchy`, and it is unnecessary here because the five-minute windows already bound file size.)
 
-Approximate size relationship for the same records: Sentinel-billed raw bytes are about 25 percent smaller than the incoming JSON, and Parquet+Snappy is typically 4-6x smaller than the raw volume. For example, a table at 800 GB/day of raw Sentinel volume lands at roughly 120-215 GB/day as Parquet+Snappy. To tune `maxRowsPerFile`, measure actual Parquet bytes per row after a run (file size divided by row count) and set `maxRowsPerFile = target_bytes / bytes_per_row`.
+Approximate size relationship for the same records: Sentinel-billed raw bytes are about 25 percent smaller than the incoming JSON, and Parquet+Snappy is typically 4-6x smaller than the raw volume. For example, a table at 800 GB/day of raw Sentinel volume lands at roughly 120-215 GB/day as Parquet+Snappy, or about 0.4-0.7 GB per five-minute Parquet file.
+
+### Parallelism
+
+The master pipeline discovers all matching `am-*` containers and copies them in parallel. The degree of parallelism is set by the `ForEach` activity's `batchCount` (16 in this template), which is the upper bound; the actual number of concurrent copies is the smaller of `batchCount` and the number of matching containers. Raising it speeds up the hourly run when there are many tables, at the cost of higher peak load on the storage accounts. If you see `503 ServerBusy` throttling, lower `batchCount` in the `pl_discover_and_export_azmon_to_parquet` pipeline definition (it is an integer literal on the `ForEach` activity, not a deployment parameter).
 
 ## Viewing Parquet Output
 
@@ -134,9 +138,9 @@ Compression trade-offs:
 To federate this Parquet output into the Microsoft Sentinel data lake using the Azure Data Lake Storage Gen2 connector:
 
 - Use the account endpoint as the connector URL, for example `https://<account>.dfs.core.windows.net/`. The connector rejects container or folder paths; it discovers tables from the folder layout inside the account.
-- The connector discovers one table per folder. With this layout, each `am-*` container appears as a table with table path `<filesystem>/<container>`.
-- Federated tables appear in Sentinel as `<table>_<instanceName>`, where `<instanceName>` is the connector instance name. For example, `am-azuremetrics` becomes `am-azuremetrics_<instanceName>`.
-- Because the table names contain a hyphen, bracket them in KQL, for example `['am-azuremetrics_<instanceName>']`.
+- The connector discovers one table per folder. With this layout, each container appears as a table with table path `<filesystem>/<table>`, where `<table>` is the container name with the `am-` prefix removed (for example, `sentinel-bcdr/signinlogs`).
+- Federated tables appear in Sentinel as `<table>_<instanceName>`, where `<instanceName>` is the connector instance name. For example, the `am-azuremetrics` container becomes the `azuremetrics` table and federates as `azuremetrics_<instanceName>`.
+- If a federated table name contains characters that are not valid KQL identifiers, bracket it in KQL, for example `['azuremetrics_<instanceName>']`.
 - Grant the connector's service principal the `Storage Blob Data Reader` role on the target storage account, enable Hierarchical namespace on the account, and grant the Sentinel platform identity (prefixed `msg-resources-`) access to the Key Vault secret.
 - Parquet and delta are supported formats. A `TimeGenerated` column enables enhanced lake features; the pipeline preserves it from the source data.
 
@@ -146,7 +150,7 @@ If federation shows "No data available" with zero tables, confirm the output use
 
 If the copy activity fails with `TypeConversionConnectorNotSupported` and mentions `JsonPathV2`, redeploy the latest template. JSON source files are treated as hierarchical data by Data Factory, and ADF type conversion is supported only for tabular data shapes. This template keeps the JSON-to-Parquet copy translator minimal so Data Factory does not enable unsupported type conversion for the JSON source.
 
-If the copy activity fails with `FileNamePrefixNotSupportSpecifyWithoutMaxRowsPerFile`, redeploy the latest template. Data Factory only supports `fileNamePrefix` for Parquet writes when `maxRowsPerFile` is also configured. This template does not set a file name prefix, so Data Factory auto-generates Parquet part file names inside each partition folder.
+If the copy activity fails with `MaxRowsPerFileNotSupportSuchCopyBehavior`, redeploy the latest template. Data Factory does not allow `maxRowsPerFile` together with the `FlattenHierarchy` (or `mergeFiles`) copy behavior. This template needs `FlattenHierarchy` to drop the source `WorkspaceResourceId=` path, so it does not set `maxRowsPerFile`; output file size is bounded by the five-minute source export window instead. This template also does not set a file name prefix, so Data Factory auto-generates Parquet part file names inside each partition folder.
 
 If federation shows "No data available" and the storage browser shows Parquet files buried under a `.../day=.../WorkspaceResourceId=/subscriptions/<guid>/.../workspaces/<name>/y=/m=/d=/h=/m=/` path, the copy was mirroring the source blob hierarchy. Redeploy the latest template. The Parquet sink uses `copyBehavior: FlattenHierarchy`, which writes files directly into the descriptive `year=/month=/day=/[hour=/]` partitions and drops the source path. The `WorkspaceResourceId=` segment is an invalid Hive partition (its value contains `/` and a GUID), so the connector cannot discover partitions until it is gone.
 

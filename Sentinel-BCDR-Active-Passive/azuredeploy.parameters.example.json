@@ -44,14 +44,8 @@
     "processingDelayHours": {
       "value": 1
     },
-    "maxConcurrentContainers": {
-      "value": 8
-    },
     "hourlyTables": {
       "value": "am-microsoftgraphactivitylogs"
-    },
-    "maxRowsPerFile": {
-      "value": 1000000
     },
     "logAnalyticsWorkspaceId": {
       "value": ""

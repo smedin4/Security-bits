@@ -49,9 +49,9 @@
     },
     "targetRootPath": {
       "type": "string",
-      "defaultValue": "sentinel-bcdr",
+      "defaultValue": "",
       "metadata": {
-        "description": "Target root path below the file system."
+        "description": "Optional root folder prefix below the target file system. Leave empty so each source container becomes a top-level table folder, which is required for Sentinel data lake federation table discovery."
       }
     },
     "sourceContainerPrefix": {
@@ -118,6 +118,21 @@
       "maxValue": 50,
       "metadata": {
         "description": "Maximum parallel container exports in the master pipeline."
+      }
+    },
+    "hourlyTables": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Optional comma-separated list of source container names to partition by hour instead of day. All other tables use day-level partitioning. Example: am-microsoftgraphactivitylogs,am-azurediagnostics."
+      }
+    },
+    "maxRowsPerFile": {
+      "type": "int",
+      "defaultValue": 1000000,
+      "minValue": 1,
+      "metadata": {
+        "description": "Maximum rows per output Parquet file. Caps file size for high-volume tables; tiny tables stay in a single file. Tune from measured Parquet bytes/row, targeting roughly 0.5-1 GB per file."
       }
     },
     "logAnalyticsWorkspaceId": {
@@ -210,7 +225,15 @@
           },
           "targetRootPath": {
             "type": "String",
-            "defaultValue": "sentinel-bcdr"
+            "defaultValue": ""
+          },
+          "hourlyTables": {
+            "type": "String",
+            "defaultValue": ""
+          },
+          "maxRowsPerFile": {
+            "type": "Int",
+            "defaultValue": 1000000
           },
           "runId": {
             "type": "String",
@@ -264,7 +287,8 @@
                   "type": "AzureBlobFSWriteSettings"
                 },
                 "formatSettings": {
-                  "type": "ParquetWriteSettings"
+                  "type": "ParquetWriteSettings",
+                  "maxRowsPerFile": "@pipeline().parameters.maxRowsPerFile"
                 }
               },
               "enableStaging": false,
@@ -286,7 +310,7 @@
                 "referenceName": "ds_target_static_parquet",
                 "type": "DatasetReference",
                 "parameters": {
-                  "folderPath": "@concat(pipeline().parameters.targetRootPath, '/table=', pipeline().parameters.containerName, '/year=', formatDateTime(pipeline().parameters.modifiedAfterUtc, 'yyyy'), '/month=', formatDateTime(pipeline().parameters.modifiedAfterUtc, 'MM'), '/day=', formatDateTime(pipeline().parameters.modifiedAfterUtc, 'dd'), '/hour=', formatDateTime(pipeline().parameters.modifiedAfterUtc, 'HH'), '/batch=', pipeline().parameters.runId)"
+                  "folderPath": "@concat(if(empty(pipeline().parameters.targetRootPath), '', concat(pipeline().parameters.targetRootPath, '/')), pipeline().parameters.containerName, '/year=', formatDateTime(pipeline().parameters.modifiedAfterUtc, 'yyyy'), '/month=', formatDateTime(pipeline().parameters.modifiedAfterUtc, 'MM'), '/day=', formatDateTime(pipeline().parameters.modifiedAfterUtc, 'dd'), if(contains(concat(',', toLower(replace(pipeline().parameters.hourlyTables, ' ', '')), ','), concat(',', toLower(pipeline().parameters.containerName), ',')), concat('/hour=', formatDateTime(pipeline().parameters.modifiedAfterUtc, 'HH')), ''))"
                 }
               }
             ]
@@ -332,7 +356,15 @@
           },
           "targetRootPath": {
             "type": "String",
-            "defaultValue": "sentinel-bcdr"
+            "defaultValue": ""
+          },
+          "hourlyTables": {
+            "type": "String",
+            "defaultValue": ""
+          },
+          "maxRowsPerFile": {
+            "type": "Int",
+            "defaultValue": 1000000
           },
           "maxConcurrentContainers": {
             "type": "Int",
@@ -409,6 +441,8 @@
                       "sourceFolderPath": "@pipeline().parameters.sourceFolderPath",
                       "sourceFilePattern": "@pipeline().parameters.sourceFilePattern",
                       "targetRootPath": "@pipeline().parameters.targetRootPath",
+                      "hourlyTables": "@pipeline().parameters.hourlyTables",
+                      "maxRowsPerFile": "@pipeline().parameters.maxRowsPerFile",
                       "runId": "@pipeline().RunId"
                     }
                   }
@@ -538,6 +572,8 @@
               "sourceFolderPath": "[parameters('sourceWildcardFolderPath')]",
               "sourceFilePattern": "[parameters('sourceFilePattern')]",
               "targetRootPath": "[parameters('targetRootPath')]",
+              "hourlyTables": "[parameters('hourlyTables')]",
+              "maxRowsPerFile": "[parameters('maxRowsPerFile')]",
               "maxConcurrentContainers": "[parameters('maxConcurrentContainers')]"
             }
           }

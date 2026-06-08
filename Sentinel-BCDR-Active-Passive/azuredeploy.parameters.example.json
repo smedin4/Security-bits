@@ -21,7 +21,7 @@
       "value": "sentinel-bcdr"
     },
     "targetRootPath": {
-      "value": "sentinel-bcdr"
+      "value": ""
     },
     "sourceContainerPrefix": {
       "value": "am-"
@@ -46,6 +46,12 @@
     },
     "maxConcurrentContainers": {
       "value": 8
+    },
+    "hourlyTables": {
+      "value": "am-microsoftgraphactivitylogs"
+    },
+    "maxRowsPerFile": {
+      "value": 1000000
     },
     "logAnalyticsWorkspaceId": {
       "value": ""

@@ -142,9 +142,50 @@ To federate this Parquet output into the Microsoft Sentinel data lake using the 
 - Federated tables appear in Sentinel as `<table>_<instanceName>`, where `<instanceName>` is the connector instance name. For example, the `am-azuremetrics` container becomes the `azuremetrics` table and federates as `azuremetrics_<instanceName>`.
 - If a federated table name contains characters that are not valid KQL identifiers, bracket it in KQL, for example `['azuremetrics_<instanceName>']`.
 - Grant the connector's service principal the `Storage Blob Data Reader` role on the target storage account, enable Hierarchical namespace on the account, and grant the Sentinel platform identity (prefixed `msg-resources-`) access to the Key Vault secret.
-- Parquet and delta are supported formats. A `TimeGenerated` column enables enhanced lake features; the pipeline preserves it from the source data.
+- The connector requires **Delta Parquet** format: each table folder must contain a `_delta_log/` transaction log alongside its `.snappy.parquet` data files. Plain Parquet with no `_delta_log/` is not discovered and the table shows "No data available". A `TimeGenerated` column enables enhanced lake features and preserves original event times; without it, federated rows are timestamped at query time.
 
-If federation shows "No data available" with zero tables, confirm the output uses this layout (each container as a top-level folder, with no extra `targetRootPath` prefix and no `table=` segment), that the Parquet files sit directly under the `year=/month=/day=/` folders with no `WorkspaceResourceId=/subscriptions/.../` source path beneath them, and that the service principal has `Storage Blob Data Reader` on the account. A deep `WorkspaceResourceId=` path under each partition means the copy is mirroring the source hierarchy; redeploy the latest template, which sets `copyBehavior: FlattenHierarchy` to prevent that.
+> **The current pipeline output is plain Parquet and is therefore not yet federatable.** Making the pipeline emit Delta (writing a `_delta_log/`) or adding a downstream convert step is a separate, deferred task. The sample tables below prove the Delta requirement independently of the pipeline.
+
+If federation shows "No data available" with zero tables, first confirm each table folder is a **Delta** table (it contains a `_delta_log/` subfolder) — plain Parquet alone is never discovered. Then confirm the output uses this layout (each container as a top-level folder, with no extra `targetRootPath` prefix and no `table=` segment), that the Parquet files sit directly under the `year=/month=/day=/` folders with no `WorkspaceResourceId=/subscriptions/.../` source path beneath them, and that the service principal has `Storage Blob Data Reader` on the account. A deep `WorkspaceResourceId=` path under each partition means the copy is mirroring the source hierarchy; redeploy the latest template, which sets `copyBehavior: FlattenHierarchy` to prevent that.
+
+### Testing federation with sample Delta tables
+
+The connector only reads **Delta** tables: a folder is recognized as a table only when it contains a `_delta_log/` transaction log, and the Delta reader serves **only** the data files listed in that log. Plain `.snappy.parquet` files with no `_delta_log/`, or extra Parquet files not referenced by the log, are ignored.
+
+The [federation-samples/](federation-samples) folder contains a generator that produces three ready-to-upload Delta tables under `federation-samples/out/`:
+
+| Folder | Decoy plain Parquet (ignored) | Delta-committed rows | Federation shows |
+| --- | --- | --- | --- |
+| `fedsample1` | 10 rows | 5 | **5** |
+| `fedsample2` | 10 rows | 0 (empty Delta commit) | **0** |
+| `fedsample3` | 0 rows (empty) | 10 | **10** |
+
+Each folder contains a `_delta_log/00000000000000000000.json` log plus the `part-00000-<guid>.snappy.parquet` it references, and a decoy `extra_plain_data.parquet` that is deliberately **not** referenced by the log. Because federation returns 5 / 0 / 10 (not 15 / 10 / 10), the decoys prove that only Delta-committed rows are served and stray Parquet is ignored. `fedsample2` also shows that an empty Delta commit still appears as a discoverable, empty table.
+
+The sample schema is `TimeGenerated` (timestamp), `Hostname`, `SourceIP`, `SourcePort` (int), `DestinationIP`, `DestinationPort` (int), and `Action` (`allow`/`deny`).
+
+Generate the samples:
+
+```powershell
+cd federation-samples
+pip install pyarrow
+python generate_federation_samples.py
+```
+
+Upload and federate:
+
+1. Upload each `fedsampleN/` folder — including its `_delta_log/` subfolder — to the ADLS Gen2 container (for example, `sentinel-bcdr`). Pre-generated copies are committed under `federation-samples/out/`.
+2. Create a federation connector instance pointing at the account endpoint URL `https://<account>.dfs.core.windows.net/` (not a container or folder path).
+3. Each folder is discovered as a table named `fedsampleN_<instanceName>`.
+
+Query with an explicit time range rather than `ago()`, because the sample `TimeGenerated` values are fixed to 2026-06-08:
+
+```kusto
+fedsample3_<instanceName>
+| where TimeGenerated between (datetime(2026-06-08) .. datetime(2026-06-09))
+```
+
+Expect 5, 0, and 10 rows from `fedsample1`, `fedsample2`, and `fedsample3` respectively. `fedsample3` returning 10 (while its 0-row decoy is ignored) confirms the Delta-format requirement.
 
 ## Troubleshooting
 

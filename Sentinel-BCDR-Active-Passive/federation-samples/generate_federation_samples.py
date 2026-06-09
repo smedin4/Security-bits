@@ -12,7 +12,7 @@ This script produces three sample Delta tables under ``./out/``. Each one is a t
 
   fedsample1/  decoy plain parquet (10 rows, NOT in the Delta log) + Delta-committed 5 rows  -> connector shows 5
   fedsample2/  decoy plain parquet (10 rows, NOT in the Delta log) + Delta-committed 0 rows  -> connector shows 0
-  fedsample3/  Delta-committed 10 rows                                                        -> connector shows 10
+  fedsample3/  decoy plain parquet (0 rows, empty, NOT in the Delta log) + Delta-committed 10 rows  -> connector shows 10
 
 If fedsample3 shows 10 rows while fedsample1 shows 5 (not 15), it confirms the connector reads
 only Delta-committed rows and ignores stray plain Parquet -- i.e. the Delta format is mandatory.
@@ -20,8 +20,9 @@ only Delta-committed rows and ignores stray plain Parquet -- i.e. the Delta form
 Each table folder contains:
   _delta_log/00000000000000000000.json   the Delta transaction log (required)
   part-00000-<guid>.snappy.parquet       the data file referenced by the log
-and fedsample1 / fedsample2 also contain:
   extra_plain_data.parquet               a plain parquet NOT referenced by the log (ignored by the reader)
+The decoy extra_plain_data.parquet has 10 rows in fedsample1 / fedsample2 and 0 rows (empty) in
+fedsample3, to show the reader ignores it regardless of its contents.
 
 Table schema:
   TimeGenerated   timestamp (UTC)
@@ -194,8 +195,13 @@ def write_delta_log(table_dir, parquet_name, size, num_records, min_tg, max_tg) 
             handle.write(json.dumps(action, separators=(",", ":")) + "\n")
 
 
-def build_sample(out_root, name, delta_rows, decoy_rows, seed) -> None:
-    """Create one sample table folder with a committed Delta file and an optional decoy."""
+def build_sample(out_root, name, delta_rows, decoy_rows, seed, include_decoy=True) -> None:
+    """Create one sample table folder with a committed Delta file and an optional decoy.
+
+    When include_decoy is True a plain ``extra_plain_data.parquet`` is written next to the Delta
+    data file but is NOT referenced by the transaction log, so the Delta reader ignores it. It is
+    written even when decoy_rows is 0, producing a valid but empty plain Parquet file.
+    """
     table_dir = os.path.join(out_root, name)
     if os.path.exists(table_dir):
         shutil.rmtree(table_dir)
@@ -208,8 +214,9 @@ def build_sample(out_root, name, delta_rows, decoy_rows, seed) -> None:
     )
     write_delta_log(table_dir, parquet_name, size, delta_rows, min_tg, max_tg)
 
-    # Optional decoy plain Parquet, NOT referenced by the log, so the reader ignores it.
-    if decoy_rows > 0:
+    # Decoy plain Parquet, NOT referenced by the log, so the reader ignores it. Written even at
+    # 0 rows so the folder still contains a (valid but empty) plain Parquet file.
+    if include_decoy:
         write_parquet(
             os.path.join(table_dir, "extra_plain_data.parquet"),
             generate_rows(decoy_rows, seed + 1000),
@@ -224,7 +231,7 @@ def main() -> None:
     print(f"Generating Delta federation samples into: {out_root}")
     build_sample(out_root, "fedsample1", delta_rows=5, decoy_rows=10, seed=1)   # connector -> 5
     build_sample(out_root, "fedsample2", delta_rows=0, decoy_rows=10, seed=2)   # connector -> 0
-    build_sample(out_root, "fedsample3", delta_rows=10, decoy_rows=0, seed=3)   # connector -> 10
+    build_sample(out_root, "fedsample3", delta_rows=10, decoy_rows=0, seed=3)   # connector -> 10 (decoy is empty)
     print("Done. Upload each fedsampleN/ folder (including its _delta_log/ subfolder) to the container.")
 
 

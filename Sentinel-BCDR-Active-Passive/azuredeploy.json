@@ -132,6 +132,37 @@
         "description": "Set to true to create and start the hourly schedule trigger. Leave false to deploy without a schedule so you can run the pipeline manually (recommended while testing with tableAllowList)."
       }
     },
+    "deployDeltaDataFlow": {
+      "type": "bool",
+      "defaultValue": false,
+      "metadata": {
+        "description": "Set to true to deploy the optional Delta output components (a Mapping Data Flow, a warm data flow Integration Runtime, and a delta export pipeline) so you can validate them in Data Factory Studio. Leave false to deploy only the proven Parquet copy path with no behavior change. See the README 'Delta output for federation' section."
+      }
+    },
+    "dataFlowCoreCount": {
+      "type": "int",
+      "defaultValue": 8,
+      "allowedValues": [
+        8,
+        16,
+        32,
+        48,
+        80,
+        144,
+        272
+      ],
+      "metadata": {
+        "description": "Spark core count for the warm data flow Integration Runtime (used only when deployDeltaDataFlow is true). 8 is the cheapest; 16 is the Microsoft-recommended minimum for production workloads."
+      }
+    },
+    "dataFlowTimeToLiveMinutes": {
+      "type": "int",
+      "defaultValue": 10,
+      "minValue": 0,
+      "metadata": {
+        "description": "Warm-cluster time-to-live in minutes for the data flow Integration Runtime (used only when deployDeltaDataFlow is true). A short TTL keeps the Spark cluster warm between hourly runs so they skip the multi-minute cold start. 0 disables the warm pool (cold start every run)."
+      }
+    },
     "logAnalyticsWorkspaceId": {
       "type": "string",
       "defaultValue": "",
@@ -541,6 +572,189 @@
       "dependsOn": [
         "[resourceId('Microsoft.DataFactory/factories/pipelines', parameters('dataFactoryName'), 'pl_copy_monitor_container_window')]",
         "[resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName'))]"
+      ]
+    },
+    {
+      "condition": "[parameters('deployDeltaDataFlow')]",
+      "type": "Microsoft.DataFactory/factories/integrationRuntimes",
+      "apiVersion": "2018-06-01",
+      "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'ir_dataflow_warm')]",
+      "properties": {
+        "type": "Managed",
+        "typeProperties": {
+          "computeProperties": {
+            "location": "[parameters('location')]",
+            "dataFlowProperties": {
+              "computeType": "General",
+              "coreCount": "[parameters('dataFlowCoreCount')]",
+              "timeToLive": "[parameters('dataFlowTimeToLiveMinutes')]",
+              "cleanup": false
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName'))]"
+      ]
+    },
+    {
+      "condition": "[parameters('deployDeltaDataFlow')]",
+      "type": "Microsoft.DataFactory/factories/dataflows",
+      "apiVersion": "2018-06-01",
+      "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'df_json_to_delta')]",
+      "properties": {
+        "type": "MappingDataFlow",
+        "description": "Generic JSON-lines to Delta conversion with schema drift. Validate in a Data Factory Studio debug session before relying on it in production.",
+        "annotations": [
+          "sentinel-bcdr",
+          "delta"
+        ],
+        "typeProperties": {
+          "sources": [
+            {
+              "name": "SourceJson",
+              "linkedService": {
+                "referenceName": "ls_source_monitor_export_blob",
+                "type": "LinkedServiceReference"
+              }
+            }
+          ],
+          "sinks": [
+            {
+              "name": "DeltaSink",
+              "linkedService": {
+                "referenceName": "ls_target_bcdr_adlsgen2",
+                "type": "LinkedServiceReference"
+              }
+            }
+          ],
+          "transformations": [
+            {
+              "name": "AddPartitions"
+            }
+          ],
+          "scriptLines": [
+            "parameters{",
+            "\tcontainerName as string,",
+            "\tsourceFolderPath as string,",
+            "\tsourceFilePattern as string,",
+            "\ttargetFileSystem as string,",
+            "\ttargetFolder as string",
+            "}",
+            "source(allowSchemaDrift: true,",
+            "\tvalidateSchema: false,",
+            "\tinferDriftedColumnTypes: true,",
+            "\tignoreNoFilesFound: true,",
+            "\tformat: 'json',",
+            "\tcontainer: ($containerName),",
+            "\twildcardPaths: [(concat($sourceFolderPath, '/', $sourceFilePattern))],",
+            "\tdocumentForm: 'documentPerLine') ~> SourceJson",
+            "SourceJson derive(year = toString(year(toTimestamp(TimeGenerated))),",
+            "\t\tmonth = lpad(toString(month(toTimestamp(TimeGenerated))), 2, '0'),",
+            "\t\tday = lpad(toString(dayOfMonth(toTimestamp(TimeGenerated))), 2, '0')) ~> AddPartitions",
+            "AddPartitions sink(allowSchemaDrift: true,",
+            "\tvalidateSchema: false,",
+            "\tformat: 'delta',",
+            "\tfileSystem: ($targetFileSystem),",
+            "\tfolderPath: ($targetFolder),",
+            "\tmergeSchema: true,",
+            "\tautoCompact: true,",
+            "\toptimizeWrite: true,",
+            "\tinsertable: true,",
+            "\tupdateable: false,",
+            "\tdeletable: false,",
+            "\tupsertable: false,",
+            "\tpartitionBy('key', 0, year, month, day),",
+            "\tskipDuplicateMapInputs: true,",
+            "\tskipDuplicateMapOutputs: true) ~> DeltaSink"
+          ]
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName'))]",
+        "[resourceId('Microsoft.DataFactory/factories/linkedservices', parameters('dataFactoryName'), 'ls_source_monitor_export_blob')]",
+        "[resourceId('Microsoft.DataFactory/factories/linkedservices', parameters('dataFactoryName'), 'ls_target_bcdr_adlsgen2')]"
+      ]
+    },
+    {
+      "condition": "[parameters('deployDeltaDataFlow')]",
+      "type": "Microsoft.DataFactory/factories/pipelines",
+      "apiVersion": "2018-06-01",
+      "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'pl_export_container_window_delta')]",
+      "properties": {
+        "description": "Export one Azure Monitor container/window to a Delta table using the df_json_to_delta Mapping Data Flow. Opt-in alternative to the Parquet copy pipeline; validate in Studio before scheduling.",
+        "parameters": {
+          "containerName": {
+            "type": "String"
+          },
+          "modifiedAfterUtc": {
+            "type": "String"
+          },
+          "modifiedBeforeUtc": {
+            "type": "String"
+          },
+          "sourceFolderPath": {
+            "type": "String",
+            "defaultValue": "WorkspaceResourceId=*"
+          },
+          "sourceFilePattern": {
+            "type": "String",
+            "defaultValue": "PT5M*.json"
+          },
+          "targetFileSystem": {
+            "type": "String",
+            "defaultValue": "sentinel-bcdr"
+          },
+          "sourceContainerPrefix": {
+            "type": "String",
+            "defaultValue": "am-"
+          },
+          "dataFlowDebugLogging": {
+            "type": "Bool",
+            "defaultValue": false
+          }
+        },
+        "activities": [
+          {
+            "name": "WriteDeltaTable",
+            "type": "ExecuteDataFlow",
+            "dependsOn": [],
+            "policy": {
+              "timeout": "7.00:00:00",
+              "retry": 1,
+              "retryIntervalInSeconds": 120,
+              "secureOutput": false,
+              "secureInput": false
+            },
+            "typeProperties": {
+              "dataflow": {
+                "referenceName": "df_json_to_delta",
+                "type": "DataFlowReference",
+                "parameters": {
+                  "containerName": "'@{pipeline().parameters.containerName}'",
+                  "sourceFolderPath": "'@{pipeline().parameters.sourceFolderPath}'",
+                  "sourceFilePattern": "'@{pipeline().parameters.sourceFilePattern}'",
+                  "targetFileSystem": "'@{pipeline().parameters.targetFileSystem}'",
+                  "targetFolder": "'@{if(and(not(empty(pipeline().parameters.sourceContainerPrefix)), startswith(toLower(pipeline().parameters.containerName), toLower(pipeline().parameters.sourceContainerPrefix))), substring(pipeline().parameters.containerName, length(pipeline().parameters.sourceContainerPrefix), sub(length(pipeline().parameters.containerName), length(pipeline().parameters.sourceContainerPrefix))), pipeline().parameters.containerName)}'"
+                }
+              },
+              "integrationRuntime": {
+                "referenceName": "ir_dataflow_warm",
+                "type": "IntegrationRuntimeReference"
+              },
+              "traceLevel": "@if(pipeline().parameters.dataFlowDebugLogging, 'Fine', 'None')"
+            }
+          }
+        ],
+        "annotations": [
+          "sentinel-bcdr",
+          "delta"
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName'))]",
+        "[resourceId('Microsoft.DataFactory/factories/dataflows', parameters('dataFactoryName'), 'df_json_to_delta')]",
+        "[resourceId('Microsoft.DataFactory/factories/integrationRuntimes', parameters('dataFactoryName'), 'ir_dataflow_warm')]"
       ]
     },
     {

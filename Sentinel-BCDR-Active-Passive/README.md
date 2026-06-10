@@ -63,6 +63,9 @@ Copy `azuredeploy.parameters.example.json` to `azuredeploy.parameters.json` befo
 | `processingDelayHours` | No | Hours to wait before processing. Default processes the previous complete hour. | `1` |
 | `hourlyTables` | No | Comma-separated source container names to partition by hour instead of day. All other tables use day partitioning. Use the full container name including the `am-` prefix. | `am-microsoftgraphactivitylogs,am-azurediagnostics` |
 | `tableAllowList` | No | Comma-separated source container names to process. Leave empty to process all containers matching `sourceContainerPrefix`. Use it to test on a few tables before running everything. | `am-signinlogs,am-microsoftgraphactivitylogs` |
+| `deployDeltaDataFlow` | No | Set to `true` to deploy the optional Delta components (Mapping Data Flow, warm Integration Runtime, delta pipeline) for validation in Studio. `false` deploys only the Parquet copy path. | `false` |
+| `dataFlowCoreCount` | No | Spark cores for the warm data flow runtime (only when `deployDeltaDataFlow` is `true`). `8` is cheapest; `16` is the recommended production minimum. | `8` |
+| `dataFlowTimeToLiveMinutes` | No | Warm-cluster time-to-live in minutes (only when `deployDeltaDataFlow` is `true`). Keeps the Spark cluster warm between hourly runs. `0` disables the warm pool. | `10` |
 | `logAnalyticsWorkspaceId` | No | Optional Log Analytics workspace resource ID for Data Factory diagnostics. Leave empty to disable diagnostics. | `/subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.OperationalInsights/workspaces/<workspace-name>` |
 | `tags` | No | Tags applied to the Data Factory. | `{ "workload": "sentinel-bcdr" }` |
 
@@ -219,25 +222,59 @@ How to test:
 
 Restricting the table list during testing also keeps cost low, because the largest tables (and their cross-region transfer) are excluded until you are ready.
 
-## Delta output for federation (Option A — in progress)
+## Delta output for federation (Option A)
 
-The Sentinel data lake connector only reads **Delta** tables (a folder with a `_delta_log/`). The Copy activity in this template writes plain Parquet, which is not federatable on its own, so the pipeline is being upgraded to produce Delta using **Option A: a Mapping Data Flow** with an inline Delta sink. This keeps everything inside Data Factory (no extra Function or Databricks resource) and lets ADF manage the `_delta_log`, file compaction (Optimized Write / Auto Compact), and schema evolution.
+The Sentinel data lake connector only reads **Delta** tables (a folder with a `_delta_log/`). The Copy activity in this template writes plain Parquet, which is not federatable on its own, so this template also ships the **Option A** approach: a **Mapping Data Flow** that writes Delta directly. It keeps everything inside Data Factory (no extra Function or Databricks resource) and lets ADF manage the `_delta_log`, file compaction (Optimized Write / Auto Compact), and schema evolution.
 
-What this adds when complete:
+The Delta components are **opt-in** so they never affect the proven Parquet path. Set `deployDeltaDataFlow` to `true` to deploy:
 
-- A generic, **schema-drift** Mapping Data Flow (`df_json_to_delta`) that reads the JSON-lines export, derives `year`/`month`/`day` partition columns from `TimeGenerated`, and writes a partitioned **Delta** table per `am-`-stripped container.
-- A custom, **warm** Azure Integration Runtime (serverless Spark, part of the factory — not a separate resource) with a short time-to-live so the hourly runs reuse one cluster instead of paying Spark startup on every run.
-- The child pipeline's Copy activity replaced by a Data Flow activity, and the `ForEach` concurrency lowered so a few tables share the warm cluster rather than starting many at once.
+- **`df_json_to_delta`** — a generic, schema-drift Mapping Data Flow: reads the JSON-lines export, derives `year`/`month`/`day` from `TimeGenerated`, and writes a partitioned **Delta** table per `am-`-stripped container.
+- **`ir_dataflow_warm`** — a custom Azure Integration Runtime (serverless Spark) sized by `dataFlowCoreCount` with a `dataFlowTimeToLiveMinutes` warm pool, so hourly runs reuse one cluster instead of paying the cold-start each time.
+- **`pl_export_container_window_delta`** — a pipeline that runs the data flow for one container/window on the warm runtime.
 
-> **Why this is not committed yet:** a Mapping Data Flow is a Spark job written in ADF's data-flow script language and must be authored and validated in a **Data Flow debug session** in ADF Studio before the first production run. It cannot be reliably hand-written in the ARM template. The recommended path is to build `df_json_to_delta` in Studio (with debug on), confirm it writes a valid `_delta_log`, then export its JSON back into this template.
+### Why a warm Integration Runtime
 
-Starter design for the data flow (author/validate in Studio):
+A Mapping Data Flow runs on a Spark cluster. A **cold** cluster takes about 3–5 minutes to start before any data moves, and you pay for that. With an hourly pipeline that is a lot of wasted startup time. A **warm** runtime keeps the cluster alive for a short time-to-live after each run, so the next run reuses it. Microsoft recommends a custom Azure IR with TTL for operationalized pipelines. Alternatives: cold on-demand `compute` (simplest, most expensive per run); a larger cluster running less often (lower latency tolerance); or a shared factory-level TTL pool (good when many data flows exist).
 
-- **Source:** JSON, store = source blob linked service, wildcard path `<container>/WorkspaceResourceId=*/PT5M*.json`, **Allow schema drift = on**, **Infer drifted column types = on**, **Allow no files found = on**.
-- **Derived column:** `year = toString(year(toTimestamp(TimeGenerated)))`, `month = lpad(toString(month(...)),2,'0')`, `day = lpad(toString(dayOfMonth(...)),2,'0')`.
-- **Sink:** Inline **Delta**, target ADLS Gen2 linked service, folder = `<table>` (container name with `am-` removed), **Partition by** `year, month, day`, **Optimized Write = on**, **Auto Compact = on**, **Merge schema = on**, append.
+### Validate the data flow in Studio before using it
 
-The current Copy-based path stays in place until the Data Flow is validated, so deployments remain working in the meantime.
+A Mapping Data Flow is a Spark job written in ADF's data-flow script language. The definition in this template is a working starting point but **must be validated in a Data Factory Studio debug session** before you rely on it, because the exact source/sink script options can need small adjustments for your data.
+
+1. Deploy with `deployDeltaDataFlow` set to `true`.
+2. In Data Factory Studio, open **Author → Data flows → `df_json_to_delta`**.
+3. Turn on the **Data flow debug** slider (top bar). This starts an interactive debug Spark cluster (billed per hour while on — turn it off when done).
+4. Use **Data preview** on each step (source → derive → sink) to confirm the schema and partitions look right. Fix any flagged script options.
+5. Run `pl_export_container_window_delta` with **Debug** for one small container (for example `am-signinlogs`) and a recent window, then confirm a `_delta_log/` appears in the target folder.
+6. Publish, then federate the table to confirm rows are returned end to end.
+
+### Turning data flow debug logging on/off
+
+The `pl_export_container_window_delta` pipeline has a **`dataFlowDebugLogging`** parameter:
+
+- `true` → the data flow runs with trace level **Fine** (verbose, per-partition logging) — use while troubleshooting.
+- `false` (default) → trace level **None** (summary only) — use for normal runs; it is cheaper and faster.
+
+This is separate from the interactive **Data flow debug** slider above: the slider is for authoring/preview, while `dataFlowDebugLogging` controls how much detail a real pipeline run records.
+
+### Where to find the debug logs
+
+There are no debug *files* written to the storage account — data flow logs live in Data Factory monitoring:
+
+- **ADF Studio → Monitor → Pipeline runs** → open the run → click the `WriteDeltaTable` activity, then the **eyeglasses** icon for the data flow detail view: execution plan, rows read/written per transformation, partition counts, stage timings, and cluster startup time. With `dataFlowDebugLogging = true` this includes per-partition detail.
+- **Activity output JSON** → the activity's output contains `runStatus.metrics` with `rowsWritten` / `rowsRead` per sink and source.
+- **Log Analytics** (when `logAnalyticsWorkspaceId` is set) → the existing diagnostic settings send `ADFActivityRun` records to the workspace. Query them with KQL, for example:
+
+  ```kusto
+  ADFActivityRun
+  | where ActivityType == "ExecuteDataFlow"
+  | where Status in ("Failed", "Succeeded")
+  | project TimeGenerated, ActivityName, Status, Error, Output
+  | order by TimeGenerated desc
+  ```
+
+### Wiring Delta into the hourly schedule
+
+Once the data flow is validated, the final step is to have the hourly master pipeline call `pl_export_container_window_delta` instead of the Parquet copy pipeline (an `If Condition` on an output-format parameter, or switching the `ExecutePipeline` reference). That wiring is intentionally left until after Studio validation so an unvalidated data flow can never break the scheduled run. Ask for it when you are ready and it can be added.
 
 ## Cost estimations
 

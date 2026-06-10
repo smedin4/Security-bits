@@ -53,6 +53,15 @@
     "enableTrigger": {
       "value": false
     },
+    "deployDeltaDataFlow": {
+      "value": false
+    },
+    "dataFlowCoreCount": {
+      "value": 8
+    },
+    "dataFlowTimeToLiveMinutes": {
+      "value": 10
+    },
     "logAnalyticsWorkspaceId": {
       "value": ""
     },

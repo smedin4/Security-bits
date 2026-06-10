@@ -58,9 +58,11 @@ Copy `azuredeploy.parameters.example.json` to `azuredeploy.parameters.json` befo
 | `sourceFilePattern` | No | File pattern for source export blobs. | `PT5M*.json` |
 | `triggerFrequency` | No | Schedule trigger frequency. Allowed values: `Minute`, `Hour`, `Day`, `Week`. | `Hour` |
 | `triggerInterval` | No | Schedule trigger interval. Must be at least `1`. | `1` |
-| `triggerStartTimeUtc` | No | UTC start time for the schedule trigger. Leave empty to skip trigger creation. | `2026-06-04T00:00:00Z` |
+| `triggerStartTimeUtc` | No | UTC start time for the schedule trigger. Leave empty to use a default anchor (the trigger still fires on the next hour boundary). | `2026-06-04T00:00:00Z` |
+| `enableTrigger` | No | Set to `true` to create and start the hourly schedule. Leave `false` to deploy without a schedule and run the pipeline manually (recommended while testing). | `false` |
 | `processingDelayHours` | No | Hours to wait before processing. Default processes the previous complete hour. | `1` |
 | `hourlyTables` | No | Comma-separated source container names to partition by hour instead of day. All other tables use day partitioning. Use the full container name including the `am-` prefix. | `am-microsoftgraphactivitylogs,am-azurediagnostics` |
+| `tableAllowList` | No | Comma-separated source container names to process. Leave empty to process all containers matching `sourceContainerPrefix`. Use it to test on a few tables before running everything. | `am-signinlogs,am-microsoftgraphactivitylogs` |
 | `logAnalyticsWorkspaceId` | No | Optional Log Analytics workspace resource ID for Data Factory diagnostics. Leave empty to disable diagnostics. | `/subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.OperationalInsights/workspaces/<workspace-name>` |
 | `tags` | No | Tags applied to the Data Factory. | `{ "workload": "sentinel-bcdr" }` |
 
@@ -196,3 +198,68 @@ If the copy activity fails with `MaxRowsPerFileNotSupportSuchCopyBehavior`, rede
 If federation shows "No data available" and the storage browser shows Parquet files buried under a `.../day=.../WorkspaceResourceId=/subscriptions/<guid>/.../workspaces/<name>/y=/m=/d=/h=/m=/` path, the copy was mirroring the source blob hierarchy. Redeploy the latest template. The Parquet sink uses `copyBehavior: FlattenHierarchy`, which writes files directly into the descriptive `year=/month=/day=/[hour=/]` partitions and drops the source path. The `WorkspaceResourceId=` segment is an invalid Hive partition (its value contains `/` and a GUID), so the connector cannot discover partitions until it is gone.
 
 If a later run fails with an authorization error, confirm the Data Factory managed identity has the post-deployment RBAC assignments above. For ADLS Gen2 accounts with hierarchical namespace ACLs, also confirm the identity has execute permission on parent folders and write permission on the target path.
+
+## Testing with a subset of tables
+
+Before running the pipeline for every exported table, you can test it on a few. Set the `tableAllowList` parameter to a comma-separated list of source container names (including the `am-` prefix). Only those containers are processed; everything else is skipped. Leave it empty to process all containers that match `sourceContainerPrefix`.
+
+```jsonc
+// azuredeploy.parameters.json
+"tableAllowList": { "value": "am-signinlogs" },          // one table
+"tableAllowList": { "value": "am-signinlogs,am-azureactivity" }, // a few tables
+"tableAllowList": { "value": "" }                        // all tables (default)
+```
+
+How to test:
+
+1. Set `tableAllowList` to one or two small tables and keep `enableTrigger` set to `false`.
+2. Deploy the template, then run `pl_discover_and_export_azmon_to_parquet` manually from the Data Factory Studio (**Author → pipeline → Debug** or **Add trigger → Trigger now**).
+3. Confirm only the allow-listed tables produced output in the target container.
+4. When you are happy, clear `tableAllowList` (empty) and set `enableTrigger` to `true` to process all tables on the hourly schedule.
+
+Restricting the table list during testing also keeps cost low, because the largest tables (and their cross-region transfer) are excluded until you are ready.
+
+## Delta output for federation (Option A — in progress)
+
+The Sentinel data lake connector only reads **Delta** tables (a folder with a `_delta_log/`). The Copy activity in this template writes plain Parquet, which is not federatable on its own, so the pipeline is being upgraded to produce Delta using **Option A: a Mapping Data Flow** with an inline Delta sink. This keeps everything inside Data Factory (no extra Function or Databricks resource) and lets ADF manage the `_delta_log`, file compaction (Optimized Write / Auto Compact), and schema evolution.
+
+What this adds when complete:
+
+- A generic, **schema-drift** Mapping Data Flow (`df_json_to_delta`) that reads the JSON-lines export, derives `year`/`month`/`day` partition columns from `TimeGenerated`, and writes a partitioned **Delta** table per `am-`-stripped container.
+- A custom, **warm** Azure Integration Runtime (serverless Spark, part of the factory — not a separate resource) with a short time-to-live so the hourly runs reuse one cluster instead of paying Spark startup on every run.
+- The child pipeline's Copy activity replaced by a Data Flow activity, and the `ForEach` concurrency lowered so a few tables share the warm cluster rather than starting many at once.
+
+> **Why this is not committed yet:** a Mapping Data Flow is a Spark job written in ADF's data-flow script language and must be authored and validated in a **Data Flow debug session** in ADF Studio before the first production run. It cannot be reliably hand-written in the ARM template. The recommended path is to build `df_json_to_delta` in Studio (with debug on), confirm it writes a valid `_delta_log`, then export its JSON back into this template.
+
+Starter design for the data flow (author/validate in Studio):
+
+- **Source:** JSON, store = source blob linked service, wildcard path `<container>/WorkspaceResourceId=*/PT5M*.json`, **Allow schema drift = on**, **Infer drifted column types = on**, **Allow no files found = on**.
+- **Derived column:** `year = toString(year(toTimestamp(TimeGenerated)))`, `month = lpad(toString(month(...)),2,'0')`, `day = lpad(toString(dayOfMonth(...)),2,'0')`.
+- **Sink:** Inline **Delta**, target ADLS Gen2 linked service, folder = `<table>` (container name with `am-` removed), **Partition by** `year, month, day`, **Optimized Write = on**, **Auto Compact = on**, **Merge schema = on**, append.
+
+The current Copy-based path stays in place until the Data Flow is validated, so deployments remain working in the meantime.
+
+## Cost estimations
+
+Estimated monthly cost using public pay-as-you-go USD rates. **These are planning estimates — confirm in the [Azure Pricing Calculator](https://azure.microsoft.com/pricing/calculator/) for your agreement and exact regions.** Source storage is in **UAE North**; the target ADLS Gen2 and Data Factory are in **Southeast Asia**.
+
+**Assumptions:** ~2 TB/day raw Sentinel volume → about 2.66 TB/day as JSON export (JSON is roughly 33% larger) → about **80 TB/month** transferred cross-region.
+
+| Cost item | Public rate | Approx. monthly |
+| --- | --- | --- |
+| Azure Monitor Data Export (pre-existing) | $0.10 / GB | ~$8,000 |
+| UAE North source storage (rolling JSON staging) | ~$0.02 / GB-month | ~$300–400 |
+| **Cross-region egress UAE North → Southeast Asia** | $0.08 / GB | **~$6,400** |
+| Southeast Asia ADLS Gen2 (Hot, grows with retention) | ~$0.02 / GB-month | ~$120+ |
+| ADLS Gen2 transactions | ~$0.07 / 10k writes | ~$75 |
+| Data Factory orchestration (activity runs) | $1 / 1,000 runs | ~$40 |
+| **Option A Data Flow compute** (warm 8–16 vCore IR, tuned) | $0.274 / vCore-hour | **~$1,100–1,700** |
+| **Estimated total (month 1)** | | **~$16,100–16,700** |
+
+Notes:
+
+- **Cross-region egress (~$6,400) dominates the new spend and is unavoidable** for a cross-region BCDR copy — it is the same regardless of which Delta approach is used.
+- The Delta approach only changes the **compute** line. Option A (Data Flow) ~$1,100–1,700; the alternative Copy + Azure Function approach would be ~$600–900; Databricks ~$1,200–2,000 plus operations. The difference (a few hundred dollars) is small next to the egress.
+- **Cost levers:** use `tableAllowList` to test cheaply on a few tables; move long-term Southeast Asia data to **Cool/Archive** tiers (50–80% cheaper storage); keep one **warm shared** Data Flow cluster (low `ForEach` concurrency) rather than many concurrent clusters; keep source-side retention short with a storage lifecycle policy.
+
+Pricing references: [Azure Monitor](https://azure.microsoft.com/pricing/details/monitor/), [Data Factory](https://azure.microsoft.com/pricing/details/data-factory/data-pipeline/), [Bandwidth](https://azure.microsoft.com/pricing/details/bandwidth/), [ADLS Gen2 / Blob Storage](https://azure.microsoft.com/pricing/details/storage/data-lake/).

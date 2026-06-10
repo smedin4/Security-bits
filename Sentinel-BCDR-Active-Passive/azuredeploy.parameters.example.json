@@ -47,6 +47,12 @@
     "hourlyTables": {
       "value": "am-microsoftgraphactivitylogs"
     },
+    "tableAllowList": {
+      "value": ""
+    },
+    "enableTrigger": {
+      "value": false
+    },
     "logAnalyticsWorkspaceId": {
       "value": ""
     },

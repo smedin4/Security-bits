@@ -118,6 +118,20 @@
         "description": "Optional comma-separated list of source container names to partition by hour instead of day. All other tables use day-level partitioning. Example: am-microsoftgraphactivitylogs,am-azurediagnostics."
       }
     },
+    "tableAllowList": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Optional comma-separated list of source container names to process. Leave empty to process all containers matching sourceContainerPrefix. Use this to test the pipeline on a small subset of tables before running it for everything, for example am-signinlogs,am-microsoftgraphactivitylogs."
+      }
+    },
+    "enableTrigger": {
+      "type": "bool",
+      "defaultValue": false,
+      "metadata": {
+        "description": "Set to true to create and start the hourly schedule trigger. Leave false to deploy without a schedule so you can run the pipeline manually (recommended while testing with tableAllowList)."
+      }
+    },
     "logAnalyticsWorkspaceId": {
       "type": "string",
       "defaultValue": "",
@@ -344,6 +358,10 @@
           "hourlyTables": {
             "type": "String",
             "defaultValue": ""
+          },
+          "tableAllowList": {
+            "type": "String",
+            "defaultValue": ""
           }
         },
         "activities": [
@@ -380,7 +398,7 @@
             ],
             "typeProperties": {
               "items": "@activity('ListSourceContainers').output.value",
-              "condition": "@startswith(item().name, pipeline().parameters.sourceContainerPrefix)"
+              "condition": "@and(startswith(item().name, pipeline().parameters.sourceContainerPrefix), or(empty(pipeline().parameters.tableAllowList), contains(split(replace(pipeline().parameters.tableAllowList, ' ', ''), ','), item().name)))"
             }
           },
           {
@@ -526,7 +544,7 @@
       ]
     },
     {
-      "condition": "[not(empty(parameters('triggerStartTimeUtc')))]",
+      "condition": "[or(parameters('enableTrigger'), not(empty(parameters('triggerStartTimeUtc'))))]",
       "type": "Microsoft.DataFactory/factories/triggers",
       "apiVersion": "2018-06-01",
       "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'tr_hourly_discover_and_export_azmon_to_parquet')]",
@@ -547,7 +565,8 @@
               "sourceFolderPath": "[parameters('sourceWildcardFolderPath')]",
               "sourceFilePattern": "[parameters('sourceFilePattern')]",
               "targetRootPath": "[parameters('targetRootPath')]",
-              "hourlyTables": "[parameters('hourlyTables')]"
+              "hourlyTables": "[parameters('hourlyTables')]",
+              "tableAllowList": "[parameters('tableAllowList')]"
             }
           }
         ],
@@ -556,7 +575,7 @@
           "recurrence": {
             "frequency": "[parameters('triggerFrequency')]",
             "interval": "[parameters('triggerInterval')]",
-            "startTime": "[parameters('triggerStartTimeUtc')]",
+            "startTime": "[if(empty(parameters('triggerStartTimeUtc')), '2026-01-01T00:00:00Z', parameters('triggerStartTimeUtc'))]",
             "timeZone": "UTC"
           }
         }

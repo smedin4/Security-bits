@@ -578,7 +578,7 @@
       "condition": "[parameters('deployDeltaDataFlow')]",
       "type": "Microsoft.DataFactory/factories/integrationRuntimes",
       "apiVersion": "2018-06-01",
-      "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'ir_dataflow_warm')]",
+      "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'ir-dataflow-warm')]",
       "properties": {
         "type": "Managed",
         "typeProperties": {
@@ -739,7 +739,7 @@
                 }
               },
               "integrationRuntime": {
-                "referenceName": "ir_dataflow_warm",
+                "referenceName": "ir-dataflow-warm",
                 "type": "IntegrationRuntimeReference"
               },
               "traceLevel": "@if(pipeline().parameters.dataFlowDebugLogging, 'Fine', 'None')"
@@ -754,7 +754,7 @@
       "dependsOn": [
         "[resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName'))]",
         "[resourceId('Microsoft.DataFactory/factories/dataflows', parameters('dataFactoryName'), 'df_json_to_delta')]",
-        "[resourceId('Microsoft.DataFactory/factories/integrationRuntimes', parameters('dataFactoryName'), 'ir_dataflow_warm')]"
+        "[resourceId('Microsoft.DataFactory/factories/integrationRuntimes', parameters('dataFactoryName'), 'ir-dataflow-warm')]"
       ]
     },
     {

@@ -54,7 +54,7 @@
       "value": false
     },
     "deployDeltaDataFlow": {
-      "value": false
+      "value": true
     },
     "dataFlowCoreCount": {
       "value": 8

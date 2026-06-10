@@ -639,7 +639,10 @@
             "\tsourceFolderPath as string,",
             "\tsourceFilePattern as string,",
             "\ttargetFileSystem as string,",
-            "\ttargetFolder as string",
+            "\ttargetFolder as string,",
+            "\tpartitionYear as string,",
+            "\tpartitionMonth as string,",
+            "\tpartitionDay as string",
             "}",
             "source(allowSchemaDrift: true,",
             "\tvalidateSchema: false,",
@@ -649,9 +652,9 @@
             "\tcontainer: ($containerName),",
             "\twildcardPaths: [(concat($sourceFolderPath, '/', $sourceFilePattern))],",
             "\tdocumentForm: 'documentPerLine') ~> SourceJson",
-            "SourceJson derive(year = toString(year(toTimestamp(TimeGenerated))),",
-            "\t\tmonth = lpad(toString(month(toTimestamp(TimeGenerated))), 2, '0'),",
-            "\t\tday = lpad(toString(dayOfMonth(toTimestamp(TimeGenerated))), 2, '0')) ~> AddPartitions",
+            "SourceJson derive(year = $partitionYear,",
+            "\t\tmonth = $partitionMonth,",
+            "\t\tday = $partitionDay) ~> AddPartitions",
             "AddPartitions sink(allowSchemaDrift: true,",
             "\tvalidateSchema: false,",
             "\tformat: 'delta',",
@@ -735,7 +738,10 @@
                   "sourceFolderPath": "'@{pipeline().parameters.sourceFolderPath}'",
                   "sourceFilePattern": "'@{pipeline().parameters.sourceFilePattern}'",
                   "targetFileSystem": "'@{pipeline().parameters.targetFileSystem}'",
-                  "targetFolder": "'@{if(and(not(empty(pipeline().parameters.sourceContainerPrefix)), startswith(toLower(pipeline().parameters.containerName), toLower(pipeline().parameters.sourceContainerPrefix))), substring(pipeline().parameters.containerName, length(pipeline().parameters.sourceContainerPrefix), sub(length(pipeline().parameters.containerName), length(pipeline().parameters.sourceContainerPrefix))), pipeline().parameters.containerName)}'"
+                  "targetFolder": "'@{if(and(not(empty(pipeline().parameters.sourceContainerPrefix)), startswith(toLower(pipeline().parameters.containerName), toLower(pipeline().parameters.sourceContainerPrefix))), substring(pipeline().parameters.containerName, length(pipeline().parameters.sourceContainerPrefix), sub(length(pipeline().parameters.containerName), length(pipeline().parameters.sourceContainerPrefix))), pipeline().parameters.containerName)}'",
+                  "partitionYear": "'@{formatDateTime(pipeline().parameters.modifiedAfterUtc, 'yyyy')}'",
+                  "partitionMonth": "'@{formatDateTime(pipeline().parameters.modifiedAfterUtc, 'MM')}'",
+                  "partitionDay": "'@{formatDateTime(pipeline().parameters.modifiedAfterUtc, 'dd')}'"
                 }
               },
               "integrationRuntime": {

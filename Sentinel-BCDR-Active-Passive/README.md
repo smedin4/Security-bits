@@ -54,7 +54,8 @@ Copy `azuredeploy.parameters.example.json` to `azuredeploy.parameters.json` befo
 | `targetFileSystem` | No | Target ADLS Gen2 file system/container name. | `sentinel-bcdr` |
 | `targetRootPath` | No | Optional root folder prefix below the target file system. Leave empty so each source container becomes a top-level table folder (required for Sentinel data lake federation discovery). | `` (empty) |
 | `sourceContainerPrefix` | No | Prefix used to select source containers. Azure Monitor export containers commonly use `am-`. | `am-` |
-| `sourceWildcardFolderPath` | No | Wildcard folder path below each source container. | `WorkspaceResourceId=*` |
+| `sourceWildcardFolderPath` | No | Wildcard folder path below each source container. Used when `sourceWorkspaceResourceId` is empty. | `WorkspaceResourceId=*` |
+| `sourceWorkspaceResourceId` | No | Exact value Azure Monitor writes after `WorkspaceResourceId=` in the source path (the workspace ARM ID, lowercased, beginning with `/subscriptions/`). When set, sources list only the processed hour folder instead of the whole container, keeping listing fast as history grows. Leave empty to scan the whole container. Single-workspace assumption; casing must match the storage browser exactly. | `/subscriptions/<subscription-id>/resourcegroups/<resource-group>/providers/microsoft.operationalinsights/workspaces/<workspace-name>` |
 | `sourceFilePattern` | No | File pattern for source export blobs. | `PT5M*.json` |
 | `triggerFrequency` | No | Schedule trigger frequency. Allowed values: `Minute`, `Hour`, `Day`, `Week`. | `Hour` |
 | `triggerInterval` | No | Schedule trigger interval. Must be at least `1`. | `1` |
@@ -200,6 +201,8 @@ If the copy activity fails with `MaxRowsPerFileNotSupportSuchCopyBehavior`, rede
 
 If federation shows "No data available" and the storage browser shows Parquet files buried under a `.../day=.../WorkspaceResourceId=/subscriptions/<guid>/.../workspaces/<name>/y=/m=/d=/h=/m=/` path, the copy was mirroring the source blob hierarchy. Redeploy the latest template. The Parquet sink uses `copyBehavior: FlattenHierarchy`, which writes files directly into the descriptive `year=/month=/day=/[hour=/]` partitions and drops the source path. The `WorkspaceResourceId=` segment is an invalid Hive partition (its value contains `/` and a GUID), so the connector cannot discover partitions until it is gone.
 
+If a run spends several minutes on **Listing source** while reading only a handful of files, the source is enumerating the whole container. With the default `sourceWildcardFolderPath` (`WorkspaceResourceId=*`) and recursive listing, Data Factory walks every historical five-minute folder in the container before filtering by time, so listing time grows with the container's history. Set `sourceWorkspaceResourceId` to the exact path Azure Monitor writes after `WorkspaceResourceId=` (the workspace ARM ID, lowercased, beginning with `/subscriptions/`). The copy and delta sources then list only the processed hour's `y=/m=/d=/h=/` folder, so listing stays fast regardless of history. Copy the value from the storage browser to match its casing exactly; if a run lists zero files, clear the parameter to fall back to the wildcard path. This assumes a single workspace per source container.
+
 If a later run fails with an authorization error, confirm the Data Factory managed identity has the post-deployment RBAC assignments above. For ADLS Gen2 accounts with hierarchical namespace ACLs, also confirm the identity has execute permission on parent folders and write permission on the target path.
 
 ## Testing with a subset of tables
@@ -228,8 +231,8 @@ The Sentinel data lake connector only reads **Delta** tables (a folder with a `_
 
 The Delta components are **opt-in** so they never affect the proven Parquet path. Set `deployDeltaDataFlow` to `true` to deploy:
 
-- **`df_json_to_delta`** — a generic, schema-drift Mapping Data Flow: reads the JSON-lines export, derives `year`/`month`/`day` from `TimeGenerated`, and writes a partitioned **Delta** table per `am-`-stripped container.
-- **`ir_dataflow_warm`** — a custom Azure Integration Runtime (serverless Spark) sized by `dataFlowCoreCount` with a `dataFlowTimeToLiveMinutes` warm pool, so hourly runs reuse one cluster instead of paying the cold-start each time.
+- **`df_json_to_delta`** — a generic, schema-drift Mapping Data Flow: reads the JSON-lines export and writes a flat (unpartitioned) **Delta** table per `am-`-stripped container. A flat layout matches the table structure the federation connector reads (one `_delta_log/` plus data files at the table root, like the `federation-samples/` tables). Date partitioning is intentionally omitted because the connector does not require it and partitioning a schema-drift stream by only its derived columns is rejected by the Delta sink.
+- **`ir-dataflow-warm`** — a custom Azure Integration Runtime (serverless Spark) sized by `dataFlowCoreCount` with a `dataFlowTimeToLiveMinutes` warm pool, so hourly runs reuse one cluster instead of paying the cold-start each time.
 - **`pl_export_container_window_delta`** — a pipeline that runs the data flow for one container/window on the warm runtime.
 
 ### Why a warm Integration Runtime
@@ -243,7 +246,7 @@ A Mapping Data Flow is a Spark job written in ADF's data-flow script language. T
 1. Deploy with `deployDeltaDataFlow` set to `true`.
 2. In Data Factory Studio, open **Author → Data flows → `df_json_to_delta`**.
 3. Turn on the **Data flow debug** slider (top bar). This starts an interactive debug Spark cluster (billed per hour while on — turn it off when done).
-4. Use **Data preview** on each step (source → derive → sink) to confirm the schema and partitions look right. Fix any flagged script options.
+4. Use **Data preview** on each step (source → sink) to confirm the schema looks right. Fix any flagged script options.
 5. Run `pl_export_container_window_delta` with **Debug** for one small container (for example `am-signinlogs`) and a recent window, then confirm a `_delta_log/` appears in the target folder.
 6. Publish, then federate the table to confirm rows are returned end to end.
 

@@ -65,7 +65,14 @@
       "type": "string",
       "defaultValue": "WorkspaceResourceId=*",
       "metadata": {
-        "description": "Default wildcard folder path below each source container."
+        "description": "Default wildcard folder path below each source container. Used when sourceWorkspaceResourceId is empty."
+      }
+    },
+    "sourceWorkspaceResourceId": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Optional. The exact value Azure Monitor writes after WorkspaceResourceId= in the source blob path: the Log Analytics workspace ARM ID, lowercased, beginning with /subscriptions/. When set, the copy and delta sources list only the processed hour folder instead of the whole container, which keeps source listing fast as history grows. Leave empty to scan the whole container with sourceWildcardFolderPath. Assumes a single workspace per source container; the casing must match the storage browser exactly."
       }
     },
     "sourceFilePattern": {
@@ -251,6 +258,10 @@
             "type": "String",
             "defaultValue": "PT5M*.json"
           },
+          "sourceWorkspaceResourceId": {
+            "type": "String",
+            "defaultValue": ""
+          },
           "targetRootPath": {
             "type": "String",
             "defaultValue": ""
@@ -286,7 +297,7 @@
                 "storeSettings": {
                   "type": "AzureBlobStorageReadSettings",
                   "recursive": true,
-                  "wildcardFolderPath": "@pipeline().parameters.sourceFolderPath",
+                  "wildcardFolderPath": "@if(empty(pipeline().parameters.sourceWorkspaceResourceId), pipeline().parameters.sourceFolderPath, concat('WorkspaceResourceId=', pipeline().parameters.sourceWorkspaceResourceId, '/y=', formatDateTime(pipeline().parameters.modifiedAfterUtc, 'yyyy'), '/m=', formatDateTime(pipeline().parameters.modifiedAfterUtc, 'MM'), '/d=', formatDateTime(pipeline().parameters.modifiedAfterUtc, 'dd'), '/h=', formatDateTime(pipeline().parameters.modifiedAfterUtc, 'HH')))",
                   "wildcardFileName": "@pipeline().parameters.sourceFilePattern",
                   "modifiedDatetimeStart": "@pipeline().parameters.modifiedAfterUtc",
                   "modifiedDatetimeEnd": "@pipeline().parameters.modifiedBeforeUtc"
@@ -382,6 +393,10 @@
             "type": "String",
             "defaultValue": "PT5M*.json"
           },
+          "sourceWorkspaceResourceId": {
+            "type": "String",
+            "defaultValue": ""
+          },
           "targetRootPath": {
             "type": "String",
             "defaultValue": ""
@@ -464,6 +479,7 @@
                       "modifiedBeforeUtc": "@if(equals(pipeline().parameters.modifiedBeforeUtc, ''), formatDateTime(addHours(utcNow(), mul(-1, pipeline().parameters.processingDelayHours)), 'yyyy-MM-ddTHH:00:00Z'), pipeline().parameters.modifiedBeforeUtc)",
                       "sourceFolderPath": "@pipeline().parameters.sourceFolderPath",
                       "sourceFilePattern": "@pipeline().parameters.sourceFilePattern",
+                      "sourceWorkspaceResourceId": "@pipeline().parameters.sourceWorkspaceResourceId",
                       "targetRootPath": "@pipeline().parameters.targetRootPath",
                       "hourlyTables": "@pipeline().parameters.hourlyTables",
                       "sourceContainerPrefix": "@pipeline().parameters.sourceContainerPrefix",
@@ -628,21 +644,14 @@
               }
             }
           ],
-          "transformations": [
-            {
-              "name": "AddPartitions"
-            }
-          ],
+          "transformations": [],
           "scriptLines": [
             "parameters{",
             "\tcontainerName as string,",
             "\tsourceFolderPath as string,",
             "\tsourceFilePattern as string,",
             "\ttargetFileSystem as string,",
-            "\ttargetFolder as string,",
-            "\tpartitionYear as string,",
-            "\tpartitionMonth as string,",
-            "\tpartitionDay as string",
+            "\ttargetFolder as string",
             "}",
             "source(allowSchemaDrift: true,",
             "\tvalidateSchema: false,",
@@ -650,12 +659,9 @@
             "\tignoreNoFilesFound: true,",
             "\tformat: 'json',",
             "\tcontainer: ($containerName),",
-            "\twildcardPaths: [(concat($sourceFolderPath, '/', $sourceFilePattern))],",
+            "\twildcardPaths: [(concat($sourceFolderPath, '/**/', $sourceFilePattern))],",
             "\tdocumentForm: 'documentPerLine') ~> SourceJson",
-            "SourceJson derive(year = $partitionYear,",
-            "\t\tmonth = $partitionMonth,",
-            "\t\tday = $partitionDay) ~> AddPartitions",
-            "AddPartitions sink(allowSchemaDrift: true,",
+            "SourceJson sink(allowSchemaDrift: true,",
             "\tvalidateSchema: false,",
             "\tformat: 'delta',",
             "\tfileSystem: ($targetFileSystem),",
@@ -667,7 +673,6 @@
             "\tupdateable: false,",
             "\tdeletable: false,",
             "\tupsertable: false,",
-            "\tpartitionBy('key', 0, year, month, day),",
             "\tskipDuplicateMapInputs: true,",
             "\tskipDuplicateMapOutputs: true) ~> DeltaSink"
           ]
@@ -704,6 +709,10 @@
             "type": "String",
             "defaultValue": "PT5M*.json"
           },
+          "sourceWorkspaceResourceId": {
+            "type": "String",
+            "defaultValue": ""
+          },
           "targetFileSystem": {
             "type": "String",
             "defaultValue": "sentinel-bcdr"
@@ -735,13 +744,10 @@
                 "type": "DataFlowReference",
                 "parameters": {
                   "containerName": "'@{pipeline().parameters.containerName}'",
-                  "sourceFolderPath": "'@{pipeline().parameters.sourceFolderPath}'",
+                  "sourceFolderPath": "'@{if(empty(pipeline().parameters.sourceWorkspaceResourceId), pipeline().parameters.sourceFolderPath, concat('WorkspaceResourceId=', pipeline().parameters.sourceWorkspaceResourceId, '/y=', formatDateTime(pipeline().parameters.modifiedAfterUtc, 'yyyy'), '/m=', formatDateTime(pipeline().parameters.modifiedAfterUtc, 'MM'), '/d=', formatDateTime(pipeline().parameters.modifiedAfterUtc, 'dd'), '/h=', formatDateTime(pipeline().parameters.modifiedAfterUtc, 'HH')))}'",
                   "sourceFilePattern": "'@{pipeline().parameters.sourceFilePattern}'",
                   "targetFileSystem": "'@{pipeline().parameters.targetFileSystem}'",
-                  "targetFolder": "'@{if(and(not(empty(pipeline().parameters.sourceContainerPrefix)), startswith(toLower(pipeline().parameters.containerName), toLower(pipeline().parameters.sourceContainerPrefix))), substring(pipeline().parameters.containerName, length(pipeline().parameters.sourceContainerPrefix), sub(length(pipeline().parameters.containerName), length(pipeline().parameters.sourceContainerPrefix))), pipeline().parameters.containerName)}'",
-                  "partitionYear": "'@{formatDateTime(pipeline().parameters.modifiedAfterUtc, 'yyyy')}'",
-                  "partitionMonth": "'@{formatDateTime(pipeline().parameters.modifiedAfterUtc, 'MM')}'",
-                  "partitionDay": "'@{formatDateTime(pipeline().parameters.modifiedAfterUtc, 'dd')}'"
+                  "targetFolder": "'@{if(and(not(empty(pipeline().parameters.sourceContainerPrefix)), startswith(toLower(pipeline().parameters.containerName), toLower(pipeline().parameters.sourceContainerPrefix))), substring(pipeline().parameters.containerName, length(pipeline().parameters.sourceContainerPrefix), sub(length(pipeline().parameters.containerName), length(pipeline().parameters.sourceContainerPrefix))), pipeline().parameters.containerName)}'"
                 }
               },
               "integrationRuntime": {
@@ -784,6 +790,7 @@
               "processingDelayHours": "[parameters('processingDelayHours')]",
               "sourceFolderPath": "[parameters('sourceWildcardFolderPath')]",
               "sourceFilePattern": "[parameters('sourceFilePattern')]",
+              "sourceWorkspaceResourceId": "[parameters('sourceWorkspaceResourceId')]",
               "targetRootPath": "[parameters('targetRootPath')]",
               "hourlyTables": "[parameters('hourlyTables')]",
               "tableAllowList": "[parameters('tableAllowList')]"

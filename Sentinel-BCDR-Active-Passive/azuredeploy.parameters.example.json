@@ -32,6 +32,9 @@
     "sourceFilePattern": {
       "value": "PT5M*.json"
     },
+    "sourceWorkspaceResourceId": {
+      "value": ""
+    },
     "triggerFrequency": {
       "value": "Hour"
     },

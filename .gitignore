@@ -1,0 +1,21 @@
+# VS Code workspace settings may contain machine-specific absolute paths
+# (including your username). Keep the local settings.json out of git; commit
+# only the sanitized settings.json.sample.
+.vscode/settings.json
+
+# Local deployment parameter files with real environment values
+# (subscription IDs, resource IDs, storage account names, etc.).
+**/azuredeploy.parameters.json
+*.local.parameters.json
+
+# Exception: this SOAR parameters file is a committed sample with placeholder
+# values only (Contoso), so keep it tracked.
+!SOAR-Incident-Confirm-Activity-By-Email-Buttons/azuredeploy.parameters.json
+
+# Secrets and credentials — never commit these.
+.env
+*.env
+*.key
+*.pem
+*.pfx
+*.publishsettings

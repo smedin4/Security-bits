@@ -1,0 +1,8 @@
+{
+    // Sample VS Code workspace settings. Copy this file to settings.json (which is
+    // gitignored) to use it locally. Uses the ${userHome} variable instead of a
+    // hardcoded path so no username is committed to the repository.
+    "python.analysis.extraPaths": [
+        "${userHome}/.vscode/extensions/ms-security.ms-sentinel-2.2.0/python"
+    ]
+}

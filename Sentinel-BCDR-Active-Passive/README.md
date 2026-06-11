@@ -60,11 +60,11 @@ Copy `azuredeploy.parameters.example.json` to `azuredeploy.parameters.json` befo
 | `triggerFrequency` | No | Schedule trigger frequency. Allowed values: `Minute`, `Hour`, `Day`, `Week`. | `Hour` |
 | `triggerInterval` | No | Schedule trigger interval. Must be at least `1`. | `1` |
 | `triggerStartTimeUtc` | No | UTC start time for the schedule trigger. Leave empty to use a default anchor (the trigger still fires on the next hour boundary). | `2026-06-04T00:00:00Z` |
-| `enableTrigger` | No | Set to `true` to create and start the hourly schedule. Leave `false` to deploy without a schedule and run the pipeline manually (recommended while testing). | `false` |
+| `enableTrigger` | No | Set to `true` to create the hourly schedule trigger (the Delta trigger when `deployDeltaDataFlow` is `true`, otherwise the Parquet trigger). Leave `false` to deploy without a schedule and run the pipeline manually (recommended while testing). The trigger is deployed stopped; start it once after deployment. | `false` |
 | `processingDelayHours` | No | Hours to wait before processing. Default processes the previous complete hour. | `1` |
 | `hourlyTables` | No | Comma-separated source container names to partition by hour instead of day. All other tables use day partitioning. Use the full container name including the `am-` prefix. | `am-microsoftgraphactivitylogs,am-azurediagnostics` |
 | `tableAllowList` | No | Comma-separated source container names to process. Leave empty to process all containers matching `sourceContainerPrefix`. Use it to test on a few tables before running everything. | `am-signinlogs,am-microsoftgraphactivitylogs` |
-| `deployDeltaDataFlow` | No | Set to `true` to deploy the optional Delta components (Mapping Data Flow, warm Integration Runtime, delta pipeline) for validation in Studio. `false` deploys only the Parquet copy path. | `false` |
+| `deployDeltaDataFlow` | No | Set to `true` to deploy the Delta components (Mapping Data Flow, warm Integration Runtime, Delta export and discovery pipelines) and make the hourly schedule produce federatable Delta. `false` deploys only the Parquet copy path and its trigger. | `false` |
 | `dataFlowCoreCount` | No | Spark cores for the warm data flow runtime (only when `deployDeltaDataFlow` is `true`). `8` is cheapest; `16` is the recommended production minimum. | `8` |
 | `dataFlowTimeToLiveMinutes` | No | Warm-cluster time-to-live in minutes (only when `deployDeltaDataFlow` is `true`). Keeps the Spark cluster warm between hourly runs. `0` disables the warm pool. | `10` |
 | `logAnalyticsWorkspaceId` | No | Optional Log Analytics workspace resource ID for Data Factory diagnostics. Leave empty to disable diagnostics. | `/subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.OperationalInsights/workspaces/<workspace-name>` |
@@ -313,9 +313,49 @@ There are no debug *files* written to the storage account — data flow logs liv
   | order by TimeGenerated desc
   ```
 
-### Wiring Delta into the hourly schedule
+### Running on a permanent hourly schedule
 
-Once the data flow is validated, the final step is to have the hourly master pipeline call `pl_export_container_window_delta` instead of the Parquet copy pipeline (an `If Condition` on an output-format parameter, or switching the `ExecutePipeline` reference). That wiring is intentionally left until after Studio validation so an unvalidated data flow can never break the scheduled run. Ask for it when you are ready and it can be added.
+The Delta path has its own discovery pipeline and schedule, wired the same way as the Parquet path:
+
+- **`pl_discover_and_export_azmon_to_delta`** discovers the matching `am-*` containers and runs `pl_export_container_window_delta` for each one.
+- **`tr_hourly_discover_and_export_azmon_to_delta`** runs that pipeline on the hourly schedule.
+
+`deployDeltaDataFlow` selects which format the schedule uses, so only one trigger is ever active:
+
+- `deployDeltaDataFlow: true` → the **Delta** trigger is created (federatable output); the Parquet trigger is not.
+- `deployDeltaDataFlow: false` → the **Parquet** trigger is created and no Delta components are deployed.
+
+To run the federatable Delta export every hour, permanently:
+
+1. Keep `deployDeltaDataFlow` set to `true` (it selects the Delta schedule).
+2. Set `enableTrigger` to `true` to create the hourly trigger.
+3. *(Optional)* Limit the run to specific tables with `tableAllowList` — see [Limiting the scheduled run to specific tables](#limiting-the-scheduled-run-to-specific-tables).
+4. Redeploy the template.
+5. **Start the trigger.** Resource Manager deploys triggers in a stopped state, so start it once after deployment:
+   - Studio: **Manage → Triggers → `tr_hourly_discover_and_export_azmon_to_delta` → Start**, then **Publish**.
+   - Or Azure CLI:
+
+     ```bash
+     az datafactory trigger start \
+       --resource-group <resource-group> \
+       --factory-name <data-factory-name> \
+       --name tr_hourly_discover_and_export_azmon_to_delta
+     ```
+6. Verify in **Monitor → Trigger runs** that it fires each hour, that `_delta_log/` updates in each table folder, and that the federated tables refresh in the Sentinel data lake.
+
+Each run processes the previous complete hour: at run time *T* it reads the window *[T − 2h, T − 1h)* (with `processingDelayHours: 1`), which gives Azure Monitor time to finish exporting that hour. Scheduled runs pass `sourceWorkspaceResourceId` automatically, so source listing stays fast — unlike a manual run, where you must type it (see [Supplying parameters for manual runs](#supplying-parameters-for-manual-runs)).
+
+The Delta discovery pipeline fans out with a `ForEach` `batchCount` of 4 (lower than the Parquet path's 16), because each Delta export runs a Spark data flow on the warm Integration Runtime and a high concurrency would start many Spark clusters at once. Adjust it in the `pl_discover_and_export_azmon_to_delta` pipeline definition to trade compute cost against how quickly the hourly run completes.
+
+### Limiting the scheduled run to specific tables
+
+To run the schedule for only some tables, set `tableAllowList` to a comma-separated list of source container names (including the `am-` prefix); leave it empty to process every container matching `sourceContainerPrefix`. This is the same parameter described in [Testing with a subset of tables](#testing-with-a-subset-of-tables), and it applies to both manual and scheduled runs.
+
+```jsonc
+// azuredeploy.parameters.json
+"tableAllowList": { "value": "am-signinlogs,am-microsoftgraphactivitylogs" }, // only these tables
+"tableAllowList": { "value": "" }                                              // all tables (default)
+```
 
 ## Cost estimations
 

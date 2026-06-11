@@ -770,7 +770,145 @@
       ]
     },
     {
-      "condition": "[or(parameters('enableTrigger'), not(empty(parameters('triggerStartTimeUtc'))))]",
+      "condition": "[parameters('deployDeltaDataFlow')]",
+      "type": "Microsoft.DataFactory/factories/pipelines",
+      "apiVersion": "2018-06-01",
+      "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'pl_discover_and_export_azmon_to_delta')]",
+      "properties": {
+        "description": "Discover matching Azure Monitor export containers through Azure Resource Manager and export the previous processing window to Delta tables using the df_json_to_delta data flow. Opt-in Delta equivalent of pl_discover_and_export_azmon_to_parquet.",
+        "parameters": {
+          "sourceStorageAccountResourceId": {
+            "type": "String"
+          },
+          "sourceContainerPrefix": {
+            "type": "String",
+            "defaultValue": "am-"
+          },
+          "processingDelayHours": {
+            "type": "Int",
+            "defaultValue": 1
+          },
+          "modifiedAfterUtc": {
+            "type": "String",
+            "defaultValue": ""
+          },
+          "modifiedBeforeUtc": {
+            "type": "String",
+            "defaultValue": ""
+          },
+          "sourceFolderPath": {
+            "type": "String",
+            "defaultValue": "WorkspaceResourceId=*"
+          },
+          "sourceFilePattern": {
+            "type": "String",
+            "defaultValue": "PT5M*.json"
+          },
+          "sourceWorkspaceResourceId": {
+            "type": "String",
+            "defaultValue": ""
+          },
+          "targetFileSystem": {
+            "type": "String",
+            "defaultValue": "sentinel-bcdr"
+          },
+          "tableAllowList": {
+            "type": "String",
+            "defaultValue": ""
+          }
+        },
+        "activities": [
+          {
+            "name": "ListSourceContainers",
+            "type": "WebActivity",
+            "dependsOn": [],
+            "policy": {
+              "timeout": "0.00:02:00",
+              "retry": 2,
+              "retryIntervalInSeconds": 30,
+              "secureOutput": false,
+              "secureInput": false
+            },
+            "typeProperties": {
+              "method": "GET",
+              "url": "@concat('https://management.azure.com', pipeline().parameters.sourceStorageAccountResourceId, '/blobServices/default/containers?api-version=2023-01-01')",
+              "authentication": {
+                "type": "MSI",
+                "resource": "https://management.azure.com/"
+              }
+            }
+          },
+          {
+            "name": "FilterMatchingContainers",
+            "type": "Filter",
+            "dependsOn": [
+              {
+                "activity": "ListSourceContainers",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "typeProperties": {
+              "items": "@activity('ListSourceContainers').output.value",
+              "condition": "@and(startswith(item().name, pipeline().parameters.sourceContainerPrefix), or(empty(pipeline().parameters.tableAllowList), contains(split(replace(pipeline().parameters.tableAllowList, ' ', ''), ','), item().name)))"
+            }
+          },
+          {
+            "name": "ForEachMatchingContainer",
+            "type": "ForEach",
+            "dependsOn": [
+              {
+                "activity": "FilterMatchingContainers",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "typeProperties": {
+              "items": "@activity('FilterMatchingContainers').output.value",
+              "isSequential": false,
+              "batchCount": 4,
+              "activities": [
+                {
+                  "name": "ExportContainerWindowDelta",
+                  "type": "ExecutePipeline",
+                  "dependsOn": [],
+                  "typeProperties": {
+                    "pipeline": {
+                      "referenceName": "pl_export_container_window_delta",
+                      "type": "PipelineReference"
+                    },
+                    "waitOnCompletion": true,
+                    "parameters": {
+                      "containerName": "@item().name",
+                      "modifiedAfterUtc": "@if(equals(pipeline().parameters.modifiedAfterUtc, ''), formatDateTime(addHours(utcNow(), mul(-1, add(pipeline().parameters.processingDelayHours, 1))), 'yyyy-MM-ddTHH:00:00Z'), pipeline().parameters.modifiedAfterUtc)",
+                      "modifiedBeforeUtc": "@if(equals(pipeline().parameters.modifiedBeforeUtc, ''), formatDateTime(addHours(utcNow(), mul(-1, pipeline().parameters.processingDelayHours)), 'yyyy-MM-ddTHH:00:00Z'), pipeline().parameters.modifiedBeforeUtc)",
+                      "sourceFolderPath": "@pipeline().parameters.sourceFolderPath",
+                      "sourceFilePattern": "@pipeline().parameters.sourceFilePattern",
+                      "sourceWorkspaceResourceId": "@pipeline().parameters.sourceWorkspaceResourceId",
+                      "targetFileSystem": "@pipeline().parameters.targetFileSystem",
+                      "sourceContainerPrefix": "@pipeline().parameters.sourceContainerPrefix"
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "annotations": [
+          "sentinel-bcdr",
+          "delta",
+          "runtime-discovery"
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName'))]",
+        "[resourceId('Microsoft.DataFactory/factories/pipelines', parameters('dataFactoryName'), 'pl_export_container_window_delta')]"
+      ]
+    },
+    {
+      "condition": "[and(not(parameters('deployDeltaDataFlow')), or(parameters('enableTrigger'), not(empty(parameters('triggerStartTimeUtc')))))]",
       "type": "Microsoft.DataFactory/factories/triggers",
       "apiVersion": "2018-06-01",
       "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'tr_hourly_discover_and_export_azmon_to_parquet')]",
@@ -810,6 +948,49 @@
       "dependsOn": [
         "[resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName'))]",
         "[resourceId('Microsoft.DataFactory/factories/pipelines', parameters('dataFactoryName'), 'pl_discover_and_export_azmon_to_parquet')]"
+      ]
+    },
+    {
+      "condition": "[and(parameters('deployDeltaDataFlow'), or(parameters('enableTrigger'), not(empty(parameters('triggerStartTimeUtc')))))]",
+      "type": "Microsoft.DataFactory/factories/triggers",
+      "apiVersion": "2018-06-01",
+      "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'tr_hourly_discover_and_export_azmon_to_delta')]",
+      "properties": {
+        "annotations": [
+          "sentinel-bcdr",
+          "delta"
+        ],
+        "pipelines": [
+          {
+            "pipelineReference": {
+              "referenceName": "pl_discover_and_export_azmon_to_delta",
+              "type": "PipelineReference"
+            },
+            "parameters": {
+              "sourceStorageAccountResourceId": "[parameters('sourceStorageAccountResourceId')]",
+              "sourceContainerPrefix": "[parameters('sourceContainerPrefix')]",
+              "processingDelayHours": "[parameters('processingDelayHours')]",
+              "sourceFolderPath": "[parameters('sourceWildcardFolderPath')]",
+              "sourceFilePattern": "[parameters('sourceFilePattern')]",
+              "sourceWorkspaceResourceId": "[parameters('sourceWorkspaceResourceId')]",
+              "targetFileSystem": "[parameters('targetFileSystem')]",
+              "tableAllowList": "[parameters('tableAllowList')]"
+            }
+          }
+        ],
+        "type": "ScheduleTrigger",
+        "typeProperties": {
+          "recurrence": {
+            "frequency": "[parameters('triggerFrequency')]",
+            "interval": "[parameters('triggerInterval')]",
+            "startTime": "[if(empty(parameters('triggerStartTimeUtc')), '2026-01-01T00:00:00Z', parameters('triggerStartTimeUtc'))]",
+            "timeZone": "UTC"
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName'))]",
+        "[resourceId('Microsoft.DataFactory/factories/pipelines', parameters('dataFactoryName'), 'pl_discover_and_export_azmon_to_delta')]"
       ]
     },
     {

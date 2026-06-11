@@ -124,6 +124,28 @@ Approximate size relationship for the same records: Sentinel-billed raw bytes ar
 
 The master pipeline discovers all matching `am-*` containers and copies them in parallel. The degree of parallelism is set by the `ForEach` activity's `batchCount` (16 in this template), which is the upper bound; the actual number of concurrent copies is the smaller of `batchCount` and the number of matching containers. Raising it speeds up the hourly run when there are many tables, at the cost of higher peak load on the storage accounts. If you see `503 ServerBusy` throttling, lower `batchCount` in the `pl_discover_and_export_azmon_to_parquet` pipeline definition (it is an integer literal on the `ForEach` activity, not a deployment parameter).
 
+### Source and output formats
+
+Three data formats are involved, and it helps to be precise about how each one relates to the others:
+
+| Format | Where | What it is |
+| --- | --- | --- |
+| **JSON Lines** (NDJSON) | Source (Azure Monitor export) | One JSON object per line, with no enclosing array and no commas between records. Row-oriented text, human-readable. Written as `PT5M.json` blobs. |
+| **Parquet** | Copy path output | Columnar **binary** format. Stores data column by column with per-column compression (Snappy) and encoding (dictionary/RLE). Not human-readable; compact and fast to scan. |
+| **Delta** | Delta path output | **Not a new file format.** A folder of Parquet data files **plus** a `_delta_log/` transaction log (JSON commit files that record which Parquet files belong to the table, the schema, and statistics). In short, **Delta = Parquet + a transaction log.** The federation connector requires that log. |
+
+There are two conversions, and they are very different operations:
+
+- **JSON Lines → Parquet** is a genuine **re-encode**. Each line is parsed into a typed row, the columns are inferred (with schema drift, because each table has a different schema), and the values are written column by column with Snappy. Row-oriented text becomes columnar binary.
+- **Parquet → Delta** is **not** a re-encode. The data files stay Parquet; the writer simply **adds** a `_delta_log/` whose entries name the Parquet files that make up the table (plus protocol, schema, stats, and commit info). The reader consults the log first, then reads only the files it lists. "Converting to Delta" means wrapping Parquet with a transaction-log metadata layer — the bytes of the Parquet data files do not change.
+
+The two output paths are **independent and read the same JSON source**:
+
+- The **Copy path** (`pl_copy_monitor_container_window`) writes JSON Lines → plain Parquet with **no** `_delta_log/`, so its output is **not** federatable on its own.
+- The **Delta path** (`df_json_to_delta` / `pl_export_container_window_delta`) reads the **same** JSON Lines source and writes a Delta table directly, in one step. It does **not** read or convert the Copy path's Parquet files.
+
+Because federation only reads Delta tables, the plain-Parquet copy output always shows "No data available" in the connector; use the Delta path (or the sample Delta tables below) for federation.
+
 ## Viewing Parquet Output
 
 Parquet is a binary columnar format, so the output files cannot be read in a text editor. Visual Studio Code shows "The file is not displayed in the text editor because it is either binary or uses an unsupported text encoding." This is expected and is not caused by Snappy compression; uncompressed Parquet is also binary.
@@ -203,6 +225,8 @@ If federation shows "No data available" and the storage browser shows Parquet fi
 
 If a run spends several minutes on **Listing source** while reading only a handful of files, the source is enumerating the whole container. With the default `sourceWildcardFolderPath` (`WorkspaceResourceId=*`) and recursive listing, Data Factory walks every historical five-minute folder in the container before filtering by time, so listing time grows with the container's history. Set `sourceWorkspaceResourceId` to the exact path Azure Monitor writes after `WorkspaceResourceId=` (the workspace ARM ID, lowercased, beginning with `/subscriptions/`). The copy and delta sources then list only the processed hour's `y=/m=/d=/h=/` folder, so listing stays fast regardless of history. Copy the value from the storage browser to match its casing exactly; if a run lists zero files, clear the parameter to fall back to the wildcard path. This assumes a single workspace per source container.
 
+> **Manual runs need the value typed in.** A common cause of a slow manual run is leaving `sourceWorkspaceResourceId` blank in the **Debug** / **Trigger now** dialog. That dialog prefills from the pipeline's static defaults (empty), **not** from `azuredeploy.parameters.json`, so the source falls back to the `WorkspaceResourceId=*` wildcard and lists the whole container again. Type `sourceWorkspaceResourceId` into the dialog for manual runs, or use the scheduled trigger (`enableTrigger: true`), which passes the parameter-file value automatically. See [Supplying parameters for manual runs](#supplying-parameters-for-manual-runs).
+
 If a later run fails with an authorization error, confirm the Data Factory managed identity has the post-deployment RBAC assignments above. For ADLS Gen2 accounts with hierarchical namespace ACLs, also confirm the identity has execute permission on parent folders and write permission on the target path.
 
 ## Testing with a subset of tables
@@ -224,6 +248,20 @@ How to test:
 4. When you are happy, clear `tableAllowList` (empty) and set `enableTrigger` to `true` to process all tables on the hourly schedule.
 
 Restricting the table list during testing also keeps cost low, because the largest tables (and their cross-region transfer) are excluded until you are ready.
+
+### Supplying parameters for manual runs
+
+`azuredeploy.parameters.json` is read **only at deployment time, and it only feeds the scheduled trigger.** The pipelines are deployed as fixed definitions, so deployment values are **not** injected into the pipelines' own parameter defaults. As a result:
+
+- A **scheduled** run (from the trigger created when `enableTrigger` is `true`) receives every value from `azuredeploy.parameters.json` automatically.
+- A **manual** run (**Debug** or **Add trigger → Trigger now**) prefills its dialog from the **pipeline's static defaults**, not from `azuredeploy.parameters.json`. Parameters whose default is empty — such as `sourceWorkspaceResourceId`, `hourlyTables`, and `tableAllowList` — show up blank in the dialog even if you set them in the parameters file.
+
+This matters most for `sourceWorkspaceResourceId`: if you leave it blank in a manual run, the source falls back to the `WorkspaceResourceId=*` wildcard and lists the whole container, which can take many minutes (see the listing troubleshooting note below). For a fast manual run:
+
+- Type `sourceWorkspaceResourceId` into the run dialog (the same value as in `azuredeploy.parameters.json`, for example `/subscriptions/<subscription-id>/resourcegroups/<resource-group>/providers/microsoft.operationalinsights/workspaces/<workspace-name>`). Leave `sourceFolderPath` at its default `WorkspaceResourceId=*` — it is ignored when `sourceWorkspaceResourceId` is set.
+- The same applies to a manual **Debug** run of `pl_export_container_window_delta`: type `sourceWorkspaceResourceId`, `containerName` (the full `am-` name), and the window into its dialog.
+- For hands-off operation, deploy with `enableTrigger` set to `true`; the scheduled trigger then passes all parameter-file values on every run, with nothing to type.
+- If you run pipelines manually often, you can edit the pipeline's **Parameters** tab defaults in your own factory in Studio so the dialog prefills them. Note that redeploying the template resets those defaults to empty.
 
 ## Delta output for federation (Option A)
 
@@ -247,7 +285,7 @@ A Mapping Data Flow is a Spark job written in ADF's data-flow script language. T
 2. In Data Factory Studio, open **Author → Data flows → `df_json_to_delta`**.
 3. Turn on the **Data flow debug** slider (top bar). This starts an interactive debug Spark cluster (billed per hour while on — turn it off when done).
 4. Use **Data preview** on each step (source → sink) to confirm the schema looks right. Fix any flagged script options.
-5. Run `pl_export_container_window_delta` with **Debug** for one small container (for example `am-signinlogs`) and a recent window, then confirm a `_delta_log/` appears in the target folder.
+5. Run `pl_export_container_window_delta` with **Debug** for one small container (for example `am-signinlogs`) and a recent window. In the run dialog, set `sourceWorkspaceResourceId` (so source listing stays fast) and `containerName` to the full `am-` name, then confirm a `_delta_log/` appears in the target folder.
 6. Publish, then federate the table to confirm rows are returned end to end.
 
 ### Turning data flow debug logging on/off

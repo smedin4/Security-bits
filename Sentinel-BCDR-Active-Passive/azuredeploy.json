@@ -47,13 +47,6 @@
         "description": "Target ADLS Gen2 file system/container name."
       }
     },
-    "targetRootPath": {
-      "type": "string",
-      "defaultValue": "",
-      "metadata": {
-        "description": "Optional root folder prefix below the target file system. Leave empty so each source container becomes a top-level table folder, which is required for Sentinel data lake federation table discovery."
-      }
-    },
     "sourceContainerPrefix": {
       "type": "string",
       "defaultValue": "am-",
@@ -118,13 +111,6 @@
         "description": "Hours to wait before processing. The default processes the previous complete hour."
       }
     },
-    "hourlyTables": {
-      "type": "string",
-      "defaultValue": "",
-      "metadata": {
-        "description": "Optional comma-separated list of source container names to partition by hour instead of day. All other tables use day-level partitioning. Example: am-microsoftgraphactivitylogs,am-azurediagnostics."
-      }
-    },
     "tableAllowList": {
       "type": "string",
       "defaultValue": "",
@@ -137,13 +123,6 @@
       "defaultValue": false,
       "metadata": {
         "description": "Set to true to create and start the hourly schedule trigger. Leave false to deploy without a schedule so you can run the pipeline manually (recommended while testing with tableAllowList)."
-      }
-    },
-    "deployDeltaDataFlow": {
-      "type": "bool",
-      "defaultValue": false,
-      "metadata": {
-        "description": "Set to true to deploy the optional Delta output components (a Mapping Data Flow, a warm data flow Integration Runtime, and a delta export pipeline) so you can validate them in Data Factory Studio. Leave false to deploy only the proven Parquet copy path with no behavior change. See the README 'Delta output for federation' section."
       }
     },
     "dataFlowCoreCount": {
@@ -159,7 +138,7 @@
         272
       ],
       "metadata": {
-        "description": "Spark core count for the warm data flow Integration Runtime (used only when deployDeltaDataFlow is true). 8 is the cheapest; 16 is the Microsoft-recommended minimum for production workloads."
+        "description": "Spark core count for the warm data flow Integration Runtime. 8 is the cheapest; 16 is the Microsoft-recommended minimum for production workloads."
       }
     },
     "dataFlowTimeToLiveMinutes": {
@@ -167,7 +146,7 @@
       "defaultValue": 10,
       "minValue": 0,
       "metadata": {
-        "description": "Warm-cluster time-to-live in minutes for the data flow Integration Runtime (used only when deployDeltaDataFlow is true). A short TTL keeps the Spark cluster warm between hourly runs so they skip the multi-minute cold start. 0 disables the warm pool (cold start every run)."
+        "description": "Warm-cluster time-to-live in minutes for the data flow Integration Runtime. A short TTL keeps the Spark cluster warm between hourly runs so they skip the multi-minute cold start. 0 disables the warm pool (cold start every run)."
       }
     },
     "logAnalyticsWorkspaceId": {
@@ -185,319 +164,7 @@
       }
     }
   },
-  "variables": {
-    "$fxv#0": {
-      "name": "ds_source_monitor_json_lines",
-      "properties": {
-        "linkedServiceName": {
-          "referenceName": "ls_source_monitor_export_blob",
-          "type": "LinkedServiceReference"
-        },
-        "parameters": {
-          "containerName": {
-            "type": "String"
-          }
-        },
-        "type": "Json",
-        "typeProperties": {
-          "location": {
-            "type": "AzureBlobStorageLocation",
-            "container": "@dataset().containerName"
-          }
-        },
-        "annotations": [
-          "sentinel-bcdr"
-        ]
-      }
-    },
-    "$fxv#1": {
-      "name": "ds_target_static_parquet",
-      "properties": {
-        "linkedServiceName": {
-          "referenceName": "ls_target_bcdr_adlsgen2",
-          "type": "LinkedServiceReference"
-        },
-        "parameters": {
-          "folderPath": {
-            "type": "String"
-          }
-        },
-        "type": "Parquet",
-        "typeProperties": {
-          "location": {
-            "type": "AzureBlobFSLocation",
-            "fileSystem": "sentinel-bcdr",
-            "folderPath": "@dataset().folderPath"
-          },
-          "compressionCodec": "snappy"
-        },
-        "annotations": [
-          "sentinel-bcdr"
-        ]
-      }
-    },
-    "$fxv#2": {
-      "name": "pl_copy_monitor_container_window",
-      "properties": {
-        "description": "Copy one Azure Monitor export container/window from JSON-lines to static Snappy Parquet.",
-        "parameters": {
-          "containerName": {
-            "type": "String"
-          },
-          "modifiedAfterUtc": {
-            "type": "String"
-          },
-          "modifiedBeforeUtc": {
-            "type": "String"
-          },
-          "sourceFolderPath": {
-            "type": "String",
-            "defaultValue": "WorkspaceResourceId=*"
-          },
-          "sourceFilePattern": {
-            "type": "String",
-            "defaultValue": "PT5M*.json"
-          },
-          "sourceWorkspaceResourceId": {
-            "type": "String",
-            "defaultValue": ""
-          },
-          "targetRootPath": {
-            "type": "String",
-            "defaultValue": ""
-          },
-          "hourlyTables": {
-            "type": "String",
-            "defaultValue": ""
-          },
-          "sourceContainerPrefix": {
-            "type": "String",
-            "defaultValue": "am-"
-          },
-          "runId": {
-            "type": "String",
-            "defaultValue": "@pipeline().RunId"
-          }
-        },
-        "activities": [
-          {
-            "name": "CopyJsonLinesToParquet",
-            "type": "Copy",
-            "dependsOn": [],
-            "policy": {
-              "timeout": "7.00:00:00",
-              "retry": 2,
-              "retryIntervalInSeconds": 120,
-              "secureOutput": false,
-              "secureInput": false
-            },
-            "typeProperties": {
-              "source": {
-                "type": "JsonSource",
-                "storeSettings": {
-                  "type": "AzureBlobStorageReadSettings",
-                  "recursive": true,
-                  "wildcardFolderPath": "@if(empty(pipeline().parameters.sourceWorkspaceResourceId), pipeline().parameters.sourceFolderPath, concat('WorkspaceResourceId=', pipeline().parameters.sourceWorkspaceResourceId, '/y=', formatDateTime(pipeline().parameters.modifiedAfterUtc, 'yyyy'), '/m=', formatDateTime(pipeline().parameters.modifiedAfterUtc, 'MM'), '/d=', formatDateTime(pipeline().parameters.modifiedAfterUtc, 'dd'), '/h=', formatDateTime(pipeline().parameters.modifiedAfterUtc, 'HH')))",
-                  "wildcardFileName": "@pipeline().parameters.sourceFilePattern",
-                  "modifiedDatetimeStart": "@pipeline().parameters.modifiedAfterUtc",
-                  "modifiedDatetimeEnd": "@pipeline().parameters.modifiedBeforeUtc"
-                },
-                "formatSettings": {
-                  "type": "JsonReadSettings"
-                },
-                "additionalColumns": [
-                  {
-                    "name": "_SourceContainer",
-                    "value": "@pipeline().parameters.containerName"
-                  },
-                  {
-                    "name": "_AdfPipelineRunId",
-                    "value": "@pipeline().RunId"
-                  },
-                  {
-                    "name": "_ProcessedUtc",
-                    "value": "@utcNow()"
-                  }
-                ]
-              },
-              "sink": {
-                "type": "ParquetSink",
-                "storeSettings": {
-                  "type": "AzureBlobFSWriteSettings",
-                  "copyBehavior": "FlattenHierarchy"
-                },
-                "formatSettings": {
-                  "type": "ParquetWriteSettings"
-                }
-              },
-              "enableStaging": false,
-              "translator": {
-                "type": "TabularTranslator"
-              }
-            },
-            "inputs": [
-              {
-                "referenceName": "ds_source_monitor_json_lines",
-                "type": "DatasetReference",
-                "parameters": {
-                  "containerName": "@pipeline().parameters.containerName"
-                }
-              }
-            ],
-            "outputs": [
-              {
-                "referenceName": "ds_target_static_parquet",
-                "type": "DatasetReference",
-                "parameters": {
-                  "folderPath": "@concat(if(empty(pipeline().parameters.targetRootPath), '', concat(pipeline().parameters.targetRootPath, '/')), if(and(not(empty(pipeline().parameters.sourceContainerPrefix)), startswith(toLower(pipeline().parameters.containerName), toLower(pipeline().parameters.sourceContainerPrefix))), substring(pipeline().parameters.containerName, length(pipeline().parameters.sourceContainerPrefix), sub(length(pipeline().parameters.containerName), length(pipeline().parameters.sourceContainerPrefix))), pipeline().parameters.containerName), '/year=', formatDateTime(pipeline().parameters.modifiedAfterUtc, 'yyyy'), '/month=', formatDateTime(pipeline().parameters.modifiedAfterUtc, 'MM'), '/day=', formatDateTime(pipeline().parameters.modifiedAfterUtc, 'dd'), if(contains(concat(',', toLower(replace(pipeline().parameters.hourlyTables, ' ', '')), ','), concat(',', toLower(pipeline().parameters.containerName), ',')), concat('/hour=', formatDateTime(pipeline().parameters.modifiedAfterUtc, 'HH')), ''))"
-                }
-              }
-            ]
-          }
-        ],
-        "annotations": [
-          "sentinel-bcdr",
-          "static-parquet"
-        ]
-      }
-    },
-    "$fxv#3": {
-      "name": "pl_discover_and_export_azmon_to_parquet",
-      "properties": {
-        "description": "Discover matching Azure Monitor export containers through Azure Resource Manager and export the previous processing window to static Snappy Parquet.",
-        "parameters": {
-          "sourceStorageAccountResourceId": {
-            "type": "String"
-          },
-          "sourceContainerPrefix": {
-            "type": "String",
-            "defaultValue": "am-"
-          },
-          "processingDelayHours": {
-            "type": "Int",
-            "defaultValue": 1
-          },
-          "modifiedAfterUtc": {
-            "type": "String",
-            "defaultValue": ""
-          },
-          "modifiedBeforeUtc": {
-            "type": "String",
-            "defaultValue": ""
-          },
-          "sourceFolderPath": {
-            "type": "String",
-            "defaultValue": "WorkspaceResourceId=*"
-          },
-          "sourceFilePattern": {
-            "type": "String",
-            "defaultValue": "PT5M*.json"
-          },
-          "sourceWorkspaceResourceId": {
-            "type": "String",
-            "defaultValue": ""
-          },
-          "targetRootPath": {
-            "type": "String",
-            "defaultValue": ""
-          },
-          "hourlyTables": {
-            "type": "String",
-            "defaultValue": ""
-          },
-          "tableAllowList": {
-            "type": "String",
-            "defaultValue": ""
-          }
-        },
-        "activities": [
-          {
-            "name": "ListSourceContainers",
-            "type": "WebActivity",
-            "dependsOn": [],
-            "policy": {
-              "timeout": "0.00:02:00",
-              "retry": 2,
-              "retryIntervalInSeconds": 30,
-              "secureOutput": false,
-              "secureInput": false
-            },
-            "typeProperties": {
-              "method": "GET",
-              "url": "@concat('https://management.azure.com', pipeline().parameters.sourceStorageAccountResourceId, '/blobServices/default/containers?api-version=2023-01-01')",
-              "authentication": {
-                "type": "MSI",
-                "resource": "https://management.azure.com/"
-              }
-            }
-          },
-          {
-            "name": "FilterMatchingContainers",
-            "type": "Filter",
-            "dependsOn": [
-              {
-                "activity": "ListSourceContainers",
-                "dependencyConditions": [
-                  "Succeeded"
-                ]
-              }
-            ],
-            "typeProperties": {
-              "items": "@activity('ListSourceContainers').output.value",
-              "condition": "@and(startswith(item().name, pipeline().parameters.sourceContainerPrefix), or(empty(pipeline().parameters.tableAllowList), contains(split(replace(pipeline().parameters.tableAllowList, ' ', ''), ','), item().name)))"
-            }
-          },
-          {
-            "name": "ForEachMatchingContainer",
-            "type": "ForEach",
-            "dependsOn": [
-              {
-                "activity": "FilterMatchingContainers",
-                "dependencyConditions": [
-                  "Succeeded"
-                ]
-              }
-            ],
-            "typeProperties": {
-              "items": "@activity('FilterMatchingContainers').output.value",
-              "isSequential": false,
-              "batchCount": 16,
-              "activities": [
-                {
-                  "name": "CopyContainerWindow",
-                  "type": "ExecutePipeline",
-                  "dependsOn": [],
-                  "typeProperties": {
-                    "pipeline": {
-                      "referenceName": "pl_copy_monitor_container_window",
-                      "type": "PipelineReference"
-                    },
-                    "waitOnCompletion": true,
-                    "parameters": {
-                      "containerName": "@item().name",
-                      "modifiedAfterUtc": "@if(equals(pipeline().parameters.modifiedAfterUtc, ''), formatDateTime(addHours(utcNow(), mul(-1, add(pipeline().parameters.processingDelayHours, 1))), 'yyyy-MM-ddTHH:00:00Z'), pipeline().parameters.modifiedAfterUtc)",
-                      "modifiedBeforeUtc": "@if(equals(pipeline().parameters.modifiedBeforeUtc, ''), formatDateTime(addHours(utcNow(), mul(-1, pipeline().parameters.processingDelayHours)), 'yyyy-MM-ddTHH:00:00Z'), pipeline().parameters.modifiedBeforeUtc)",
-                      "sourceFolderPath": "@pipeline().parameters.sourceFolderPath",
-                      "sourceFilePattern": "@pipeline().parameters.sourceFilePattern",
-                      "sourceWorkspaceResourceId": "@pipeline().parameters.sourceWorkspaceResourceId",
-                      "targetRootPath": "@pipeline().parameters.targetRootPath",
-                      "hourlyTables": "@pipeline().parameters.hourlyTables",
-                      "sourceContainerPrefix": "@pipeline().parameters.sourceContainerPrefix",
-                      "runId": "@pipeline().RunId"
-                    }
-                  }
-                }
-              ]
-            }
-          }
-        ],
-        "annotations": [
-          "sentinel-bcdr",
-          "runtime-discovery"
-        ]
-      }
-    }
-  },
+  "variables": {},
   "resources": [
     {
       "type": "Microsoft.DataFactory/factories",
@@ -550,48 +217,6 @@
       ]
     },
     {
-      "type": "Microsoft.DataFactory/factories/datasets",
-      "apiVersion": "2018-06-01",
-      "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'ds_source_monitor_json_lines')]",
-      "properties": "[variables('$fxv#0').properties]",
-      "dependsOn": [
-        "[resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName'))]",
-        "[resourceId('Microsoft.DataFactory/factories/linkedservices', parameters('dataFactoryName'), 'ls_source_monitor_export_blob')]"
-      ]
-    },
-    {
-      "type": "Microsoft.DataFactory/factories/datasets",
-      "apiVersion": "2018-06-01",
-      "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'ds_target_static_parquet')]",
-      "properties": "[union(variables('$fxv#1').properties, createObject('typeProperties', createObject('location', createObject('type', 'AzureBlobFSLocation', 'fileSystem', parameters('targetFileSystem'), 'folderPath', '@dataset().folderPath'), 'compressionCodec', 'snappy')))]",
-      "dependsOn": [
-        "[resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName'))]",
-        "[resourceId('Microsoft.DataFactory/factories/linkedservices', parameters('dataFactoryName'), 'ls_target_bcdr_adlsgen2')]"
-      ]
-    },
-    {
-      "type": "Microsoft.DataFactory/factories/pipelines",
-      "apiVersion": "2018-06-01",
-      "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'pl_copy_monitor_container_window')]",
-      "properties": "[variables('$fxv#2').properties]",
-      "dependsOn": [
-        "[resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName'))]",
-        "[resourceId('Microsoft.DataFactory/factories/datasets', parameters('dataFactoryName'), 'ds_source_monitor_json_lines')]",
-        "[resourceId('Microsoft.DataFactory/factories/datasets', parameters('dataFactoryName'), 'ds_target_static_parquet')]"
-      ]
-    },
-    {
-      "type": "Microsoft.DataFactory/factories/pipelines",
-      "apiVersion": "2018-06-01",
-      "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'pl_discover_and_export_azmon_to_parquet')]",
-      "properties": "[variables('$fxv#3').properties]",
-      "dependsOn": [
-        "[resourceId('Microsoft.DataFactory/factories/pipelines', parameters('dataFactoryName'), 'pl_copy_monitor_container_window')]",
-        "[resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName'))]"
-      ]
-    },
-    {
-      "condition": "[parameters('deployDeltaDataFlow')]",
       "type": "Microsoft.DataFactory/factories/integrationRuntimes",
       "apiVersion": "2018-06-01",
       "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'ir-dataflow-warm')]",
@@ -614,7 +239,6 @@
       ]
     },
     {
-      "condition": "[parameters('deployDeltaDataFlow')]",
       "type": "Microsoft.DataFactory/factories/dataflows",
       "apiVersion": "2018-06-01",
       "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'df_json_to_delta')]",
@@ -685,7 +309,6 @@
       ]
     },
     {
-      "condition": "[parameters('deployDeltaDataFlow')]",
       "type": "Microsoft.DataFactory/factories/pipelines",
       "apiVersion": "2018-06-01",
       "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'pl_export_container_window_delta')]",
@@ -770,23 +393,23 @@
       ]
     },
     {
-      "condition": "[parameters('deployDeltaDataFlow')]",
       "type": "Microsoft.DataFactory/factories/pipelines",
       "apiVersion": "2018-06-01",
       "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'pl_discover_and_export_azmon_to_delta')]",
       "properties": {
-        "description": "Discover matching Azure Monitor export containers through Azure Resource Manager and export the previous processing window to Delta tables using the df_json_to_delta data flow. Opt-in Delta equivalent of pl_discover_and_export_azmon_to_parquet.",
+        "description": "Discover matching Azure Monitor export containers through Azure Resource Manager and export the previous processing window to Delta tables using the df_json_to_delta data flow.",
         "parameters": {
           "sourceStorageAccountResourceId": {
-            "type": "String"
+            "type": "String",
+            "defaultValue": "[parameters('sourceStorageAccountResourceId')]"
           },
           "sourceContainerPrefix": {
             "type": "String",
-            "defaultValue": "am-"
+            "defaultValue": "[parameters('sourceContainerPrefix')]"
           },
           "processingDelayHours": {
             "type": "Int",
-            "defaultValue": 1
+            "defaultValue": "[parameters('processingDelayHours')]"
           },
           "modifiedAfterUtc": {
             "type": "String",
@@ -798,23 +421,23 @@
           },
           "sourceFolderPath": {
             "type": "String",
-            "defaultValue": "WorkspaceResourceId=*"
+            "defaultValue": "[parameters('sourceWildcardFolderPath')]"
           },
           "sourceFilePattern": {
             "type": "String",
-            "defaultValue": "PT5M*.json"
+            "defaultValue": "[parameters('sourceFilePattern')]"
           },
           "sourceWorkspaceResourceId": {
             "type": "String",
-            "defaultValue": ""
+            "defaultValue": "[parameters('sourceWorkspaceResourceId')]"
           },
           "targetFileSystem": {
             "type": "String",
-            "defaultValue": "sentinel-bcdr"
+            "defaultValue": "[parameters('targetFileSystem')]"
           },
           "tableAllowList": {
             "type": "String",
-            "defaultValue": ""
+            "defaultValue": "[parameters('tableAllowList')]"
           }
         },
         "activities": [
@@ -908,50 +531,7 @@
       ]
     },
     {
-      "condition": "[and(not(parameters('deployDeltaDataFlow')), or(parameters('enableTrigger'), not(empty(parameters('triggerStartTimeUtc')))))]",
-      "type": "Microsoft.DataFactory/factories/triggers",
-      "apiVersion": "2018-06-01",
-      "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'tr_hourly_discover_and_export_azmon_to_parquet')]",
-      "properties": {
-        "annotations": [
-          "sentinel-bcdr"
-        ],
-        "pipelines": [
-          {
-            "pipelineReference": {
-              "referenceName": "pl_discover_and_export_azmon_to_parquet",
-              "type": "PipelineReference"
-            },
-            "parameters": {
-              "sourceStorageAccountResourceId": "[parameters('sourceStorageAccountResourceId')]",
-              "sourceContainerPrefix": "[parameters('sourceContainerPrefix')]",
-              "processingDelayHours": "[parameters('processingDelayHours')]",
-              "sourceFolderPath": "[parameters('sourceWildcardFolderPath')]",
-              "sourceFilePattern": "[parameters('sourceFilePattern')]",
-              "sourceWorkspaceResourceId": "[parameters('sourceWorkspaceResourceId')]",
-              "targetRootPath": "[parameters('targetRootPath')]",
-              "hourlyTables": "[parameters('hourlyTables')]",
-              "tableAllowList": "[parameters('tableAllowList')]"
-            }
-          }
-        ],
-        "type": "ScheduleTrigger",
-        "typeProperties": {
-          "recurrence": {
-            "frequency": "[parameters('triggerFrequency')]",
-            "interval": "[parameters('triggerInterval')]",
-            "startTime": "[if(empty(parameters('triggerStartTimeUtc')), '2026-01-01T00:00:00Z', parameters('triggerStartTimeUtc'))]",
-            "timeZone": "UTC"
-          }
-        }
-      },
-      "dependsOn": [
-        "[resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName'))]",
-        "[resourceId('Microsoft.DataFactory/factories/pipelines', parameters('dataFactoryName'), 'pl_discover_and_export_azmon_to_parquet')]"
-      ]
-    },
-    {
-      "condition": "[and(parameters('deployDeltaDataFlow'), or(parameters('enableTrigger'), not(empty(parameters('triggerStartTimeUtc')))))]",
+      "condition": "[or(parameters('enableTrigger'), not(empty(parameters('triggerStartTimeUtc'))))]",
       "type": "Microsoft.DataFactory/factories/triggers",
       "apiVersion": "2018-06-01",
       "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'tr_hourly_discover_and_export_azmon_to_delta')]",
@@ -966,16 +546,7 @@
               "referenceName": "pl_discover_and_export_azmon_to_delta",
               "type": "PipelineReference"
             },
-            "parameters": {
-              "sourceStorageAccountResourceId": "[parameters('sourceStorageAccountResourceId')]",
-              "sourceContainerPrefix": "[parameters('sourceContainerPrefix')]",
-              "processingDelayHours": "[parameters('processingDelayHours')]",
-              "sourceFolderPath": "[parameters('sourceWildcardFolderPath')]",
-              "sourceFilePattern": "[parameters('sourceFilePattern')]",
-              "sourceWorkspaceResourceId": "[parameters('sourceWorkspaceResourceId')]",
-              "targetFileSystem": "[parameters('targetFileSystem')]",
-              "tableAllowList": "[parameters('tableAllowList')]"
-            }
+            "parameters": {}
           }
         ],
         "type": "ScheduleTrigger",

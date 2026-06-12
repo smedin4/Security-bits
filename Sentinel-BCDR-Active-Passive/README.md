@@ -2,19 +2,20 @@
 
 [![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2Fsmedin4%2FSecurity-bits%2Fmain%2FSentinel-BCDR-Active-Passive%2Fazuredeploy.json)
 
-This mini-project deploys an Azure Data Factory pipeline that copies Azure Monitor Data Export blobs from a source storage account into static Snappy-compressed Parquet files in a target ADLS Gen2 account.
+This deploys an Azure Data Factory pipeline that converts Azure Monitor Data Export blobs from a source storage account into **Delta tables** — Snappy-compressed Parquet data files plus a `_delta_log/` transaction log — in a target ADLS Gen2 account.
 
-The deployment is intentionally parameter-driven for public use. Do not commit real subscription IDs, resource group names, storage account names, workspace names, tenant IDs, user identities, or other environment-specific values.
+The files generated in target ADLS Gen2 storage account are ready to be consumed by Sentinel data lake federation.
 
 ## What It Deploys
 
 - Azure Data Factory with a system-assigned managed identity.
 - Source Azure Blob Storage linked service using managed identity authentication.
 - Target ADLS Gen2 linked service.
-- Source JSON-lines and target Parquet datasets.
-- A child copy pipeline for a single container and time window.
-- A master discovery pipeline that lists matching source containers.
-- Optional schedule trigger.
+- A generic, schema-drift Mapping Data Flow (`df_json_to_delta`) that converts JSON-lines export blobs to a Delta table.
+- A warm data flow Integration Runtime (`ir-dataflow-warm`) that runs the data flow.
+- A child pipeline that exports a single container and time window to Delta.
+- A master discovery pipeline that lists matching source containers and fans the export out across them.
+- Optional hourly schedule trigger.
 - Optional diagnostic settings to Log Analytics.
 
 ## Prerequisites
@@ -23,11 +24,11 @@ Before deploying, create or identify:
 
 - A source storage account that receives Azure Monitor Data Export blobs.
 - Source containers that match the configured prefix, usually `am-`.
-- A target ADLS Gen2 storage account and file system for Parquet output.
+- A target ADLS Gen2 storage account and file system for Delta output.
 - Permissions to deploy Azure Data Factory in the target resource group.
 - Permissions to grant post-deployment RBAC roles on the source and target storage scopes.
 
-This template does not configure Azure Monitor Data Export. Configure export separately so blobs already land in the source storage account.
+This template does not configure Azure Monitor Data Export. Configure export separately so blobs already land in the source storage account. If in the future you add new datasources in your primary Sentinel workspace, remember to adjust the Data Export rule to include any new table.
 
 ## Deploy
 
@@ -42,37 +43,17 @@ az deployment group create `
 
 Copy `azuredeploy.parameters.example.json` to `azuredeploy.parameters.json` before adding real values. The local `azuredeploy.parameters.json` file is ignored by this subfolder's `.gitignore`.
 
-## Parameters
-
-| Parameter | Required | Description | Example |
-| --- | --- | --- | --- |
-| `dataFactoryName` | Yes | Name of the Azure Data Factory to create. Must be globally unique for Data Factory. | `<data-factory-name>` |
-| `location` | No | Azure region for the Data Factory. Defaults to the deployment resource group's location when omitted. | `eastus` |
-| `sourceStorageAccountUrl` | Yes | Blob service endpoint for the Azure Monitor Data Export source account. | `https://<source-storage-account>.blob.core.windows.net` |
-| `sourceStorageAccountResourceId` | Yes | ARM resource ID of the source storage account. Used by the master pipeline to list containers. | `/subscriptions/<subscription-id>/resourceGroups/<source-resource-group>/providers/Microsoft.Storage/storageAccounts/<source-storage-account>` |
-| `targetStorageAccountUrl` | Yes | DFS endpoint for the target ADLS Gen2 account. | `https://<target-storage-account>.dfs.core.windows.net` |
-| `targetFileSystem` | No | Target ADLS Gen2 file system/container name. | `sentinel-bcdr` |
-| `targetRootPath` | No | Optional root folder prefix below the target file system. Leave empty so each source container becomes a top-level table folder (required for Sentinel data lake federation discovery). | `` (empty) |
-| `sourceContainerPrefix` | No | Prefix used to select source containers. Azure Monitor export containers commonly use `am-`. | `am-` |
-| `sourceWildcardFolderPath` | No | Wildcard folder path below each source container. Used when `sourceWorkspaceResourceId` is empty. | `WorkspaceResourceId=*` |
-| `sourceWorkspaceResourceId` | No | Exact value Azure Monitor writes after `WorkspaceResourceId=` in the source path (the workspace ARM ID, lowercased, beginning with `/subscriptions/`). When set, sources list only the processed hour folder instead of the whole container, keeping listing fast as history grows. Leave empty to scan the whole container. Single-workspace assumption; casing must match the storage browser exactly. | `/subscriptions/<subscription-id>/resourcegroups/<resource-group>/providers/microsoft.operationalinsights/workspaces/<workspace-name>` |
-| `sourceFilePattern` | No | File pattern for source export blobs. | `PT5M*.json` |
-| `triggerFrequency` | No | Schedule trigger frequency. Allowed values: `Minute`, `Hour`, `Day`, `Week`. | `Hour` |
-| `triggerInterval` | No | Schedule trigger interval. Must be at least `1`. | `1` |
-| `triggerStartTimeUtc` | No | UTC start time for the schedule trigger. Leave empty to use a default anchor (the trigger still fires on the next hour boundary). | `2026-06-04T00:00:00Z` |
-| `enableTrigger` | No | Set to `true` to create the hourly schedule trigger (the Delta trigger when `deployDeltaDataFlow` is `true`, otherwise the Parquet trigger). Leave `false` to deploy without a schedule and run the pipeline manually (recommended while testing). The trigger is deployed stopped; start it once after deployment. | `false` |
-| `processingDelayHours` | No | Hours to wait before processing. Default processes the previous complete hour. | `1` |
-| `hourlyTables` | No | Comma-separated source container names to partition by hour instead of day. All other tables use day partitioning. Use the full container name including the `am-` prefix. | `am-microsoftgraphactivitylogs,am-azurediagnostics` |
-| `tableAllowList` | No | Comma-separated source container names to process. Leave empty to process all containers matching `sourceContainerPrefix`. Use it to test on a few tables before running everything. | `am-signinlogs,am-microsoftgraphactivitylogs` |
-| `deployDeltaDataFlow` | No | Set to `true` to deploy the Delta components (Mapping Data Flow, warm Integration Runtime, Delta export and discovery pipelines) and make the hourly schedule produce federatable Delta. `false` deploys only the Parquet copy path and its trigger. | `false` |
-| `dataFlowCoreCount` | No | Spark cores for the warm data flow runtime (only when `deployDeltaDataFlow` is `true`). `8` is cheapest; `16` is the recommended production minimum. | `8` |
-| `dataFlowTimeToLiveMinutes` | No | Warm-cluster time-to-live in minutes (only when `deployDeltaDataFlow` is `true`). Keeps the Spark cluster warm between hourly runs. `0` disables the warm pool. | `10` |
-| `logAnalyticsWorkspaceId` | No | Optional Log Analytics workspace resource ID for Data Factory diagnostics. Leave empty to disable diagnostics. | `/subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.OperationalInsights/workspaces/<workspace-name>` |
-| `tags` | No | Tags applied to the Data Factory. | `{ "workload": "sentinel-bcdr" }` |
+For a complete reference of all deployment parameters, go to the section Parameters below.
 
 ## Post-Deployment RBAC
 
 After deployment, use the `dataFactoryPrincipalId` output to grant the Data Factory managed identity access to storage.
+
+The `Reader` role is required on the source storage account so the master pipeline can list containers through Azure Resource Manager.
+
+The `Storage Blob Data Reader` role is required to read source blobs.
+
+The `Storage Blob Data Contributor` role is required to write Delta output to the target ADLS Gen2 account or file system.
 
 ```powershell
 $principalId = "<data-factory-principal-id>"
@@ -84,45 +65,26 @@ az role assignment create --assignee-object-id $principalId --assignee-principal
 az role assignment create --assignee-object-id $principalId --assignee-principal-type ServicePrincipal --role "Storage Blob Data Contributor" --scope $targetScope
 ```
 
-The `Reader` role is required on the source storage account so the master pipeline can list containers through Azure Resource Manager. `Storage Blob Data Reader` is required to read source blobs. `Storage Blob Data Contributor` is required to write Parquet output to the target ADLS Gen2 account or file system.
-
 ## Output Layout
 
-Each source container becomes a top-level table folder directly under the target file system, with Hive-style date partitions. This matches what the Sentinel data lake federation connector discovers (one folder per table). The `sourceContainerPrefix` (default `am-`) is stripped from the folder name, so the `am-signinlogs` container is written as the `signinlogs` table folder.
+Each source container becomes a top-level **Delta table** folder directly under the target file system. This matches what the Sentinel data lake federation connector discovers (one table per folder). The `sourceContainerPrefix` (default `am-`) is stripped from the folder name, so the `am-signinlogs` container is written as the `signinlogs` table folder.
 
-By default, tables are partitioned by day. Containers listed in `hourlyTables` are partitioned by hour instead, which improves time-range pruning for very high-volume tables.
+A Delta table is a folder that holds a `_delta_log/` transaction log alongside the `.snappy.parquet` data files it references:
 
 ```text
-[<targetRootPath>/]<table>/year=<yyyy>/month=<MM>/day=<dd>/[hour=<HH>/]<file>.parquet
+<table>/_delta_log/00000000000000000000.json
+<table>/part-00000-<guid>-c000.snappy.parquet
 ```
 
-Here `<table>` is the source container name with the `am-` prefix removed.
+For example, `am-signinlogs` is written as a `signinlogs/` table containing `signinlogs/_delta_log/...` and one or more `signinlogs/part-*.snappy.parquet` data files.
 
-- Day-partitioned (default): `signinlogs/year=2026/month=06/day=08/<file>.parquet`
-- Hour-partitioned (listed in `hourlyTables`): `signinlogs/year=2026/month=06/day=08/hour=05/<file>.parquet`
+The layout is flat: the data files sit at the table root with no date-partition folders. The federation connector does not require partitioning, and the `TimeGenerated` column is preserved in every row so time filtering still works in queries. The data flow enables Optimized Write and Auto Compact, so Spark sizes the Parquet data files automatically (around a 128 MB target) without any row-count setting.
 
-Leave `targetRootPath` empty so the container is the top-level table folder. A non-empty `targetRootPath` adds a prefix that the federation connector does not expect.
-
-The copy activity uses `copyBehavior: FlattenHierarchy`, so the source blob's own folder hierarchy is not mirrored into the target. Azure Monitor continuous export writes each blob under a deep `WorkspaceResourceId=/subscriptions/.../workspaces/<name>/y=/m=/d=/h=/m=/` path; flattening drops all of those source segments and writes the Parquet files directly into the descriptive `year=/month=/day=/[hour=/]` folders above. File names are auto-generated by Data Factory.
-
-> **Single-workspace limitation.** Flattening discards the source `WorkspaceResourceId` path, so all data for a table is merged into one table folder with no workspace dimension. This template assumes a single Log Analytics workspace per target container. If more than one workspace exports the same table into the same container, their rows are combined in one folder with no way to tell them apart. To support multiple workspaces, add a `WorkspaceResourceId` column (or a workspace-level root prefix) before flattening. Revisit this if you onboard additional workspaces.
-
-Full timestamps are preserved in the `TimeGenerated` column, so sub-partition (hour, minute, second) filtering still works in queries even when data is partitioned by day.
-
-### Partitioning and file size
-
-The pipeline runs hourly, so the number of files is the same whether you partition by day or hour; only the folder layout and query pruning change.
-
-- Day partitioning: fewer folders, coarser time pruning. Good default for most tables.
-- Hour partitioning: more folders, finer time pruning. Use `hourlyTables` for very high-volume tables (for example, a table approaching hundreds of GB per day) so time-bounded queries scan one hour instead of a whole day.
-
-Individual Parquet file size is bounded by the source export window, not by a row cap. Azure Monitor continuous export writes one `PT5M` blob per five-minute window, and the copy uses `FlattenHierarchy`, so each source blob becomes one auto-named Parquet file. Even the largest tables (hundreds of GB/day) produce sub-gigabyte Parquet files per window, which keeps file sizes in the efficient range without any row-count setting. (`maxRowsPerFile` is intentionally not set: Data Factory rejects it together with `FlattenHierarchy`, and it is unnecessary here because the five-minute windows already bound file size.)
-
-Approximate size relationship for the same records: Sentinel-billed raw bytes are about 25 percent smaller than the incoming JSON, and Parquet+Snappy is typically 4-6x smaller than the raw volume. For example, a table at 800 GB/day of raw Sentinel volume lands at roughly 120-215 GB/day as Parquet+Snappy, or about 0.4-0.7 GB per five-minute Parquet file.
+> **Single-workspace assumption.** The export reads one Log Analytics workspace per source container (through `sourceWorkspaceResourceId`). If more than one workspace exported the same table into the same source container, their rows would be combined in one table with no workspace dimension. Revisit this if you onboard additional workspaces.
 
 ### Parallelism
 
-The master pipeline discovers all matching `am-*` containers and copies them in parallel. The degree of parallelism is set by the `ForEach` activity's `batchCount` (16 in this template), which is the upper bound; the actual number of concurrent copies is the smaller of `batchCount` and the number of matching containers. Raising it speeds up the hourly run when there are many tables, at the cost of higher peak load on the storage accounts. If you see `503 ServerBusy` throttling, lower `batchCount` in the `pl_discover_and_export_azmon_to_parquet` pipeline definition (it is an integer literal on the `ForEach` activity, not a deployment parameter).
+The master pipeline discovers all matching `am-*` containers and exports them in parallel. The degree of parallelism is set by the `ForEach` activity's `batchCount` (4 in this template), which is the upper bound; the actual number of concurrent exports is the smaller of `batchCount` and the number of matching containers. It is kept low because each export runs a Spark data flow on the warm Integration Runtime, and a high concurrency would start many Spark clusters at once. Adjust `batchCount` in the `pl_discover_and_export_azmon_to_delta` pipeline definition to trade compute cost against how quickly the hourly run completes.
 
 ### Source and output formats
 
@@ -131,26 +93,19 @@ Three data formats are involved, and it helps to be precise about how each one r
 | Format | Where | What it is |
 | --- | --- | --- |
 | **JSON Lines** (NDJSON) | Source (Azure Monitor export) | One JSON object per line, with no enclosing array and no commas between records. Row-oriented text, human-readable. Written as `PT5M.json` blobs. |
-| **Parquet** | Copy path output | Columnar **binary** format. Stores data column by column with per-column compression (Snappy) and encoding (dictionary/RLE). Not human-readable; compact and fast to scan. |
-| **Delta** | Delta path output | **Not a new file format.** A folder of Parquet data files **plus** a `_delta_log/` transaction log (JSON commit files that record which Parquet files belong to the table, the schema, and statistics). In short, **Delta = Parquet + a transaction log.** The federation connector requires that log. |
+| **Parquet** | Delta data files | Columnar **binary** format. Stores data column by column with per-column compression (Snappy) and encoding (dictionary/RLE). Not human-readable; compact and fast to scan. |
+| **Delta** | Output (the table) | **Not a new file format.** A folder of Parquet data files **plus** a `_delta_log/` transaction log (JSON commit files that record which Parquet files belong to the table, the schema, and statistics). In short, **Delta = Parquet + a transaction log.** The federation connector requires that log. |
 
-There are two conversions, and they are very different operations:
+The pipeline produces a Delta table from the JSON-lines source in one step (the `df_json_to_delta` data flow). Two things happen:
 
-- **JSON Lines → Parquet** is a genuine **re-encode**. Each line is parsed into a typed row, the columns are inferred (with schema drift, because each table has a different schema), and the values are written column by column with Snappy. Row-oriented text becomes columnar binary.
-- **Parquet → Delta** is **not** a re-encode. The data files stay Parquet; the writer simply **adds** a `_delta_log/` whose entries name the Parquet files that make up the table (plus protocol, schema, stats, and commit info). The reader consults the log first, then reads only the files it lists. "Converting to Delta" means wrapping Parquet with a transaction-log metadata layer — the bytes of the Parquet data files do not change.
+- **JSON Lines is re-encoded to Parquet.** Each line is parsed into a typed row, the columns are inferred (with schema drift, because each table has a different schema), and the values are written column by column with Snappy. Row-oriented text becomes columnar binary.
+- **A `_delta_log/` is written** that names the Parquet data files making up the table (plus protocol, schema, stats, and commit info). The transaction log is what makes the folder a Delta table the connector can read; without it, plain Parquet files are not discovered.
 
-The two output paths are **independent and read the same JSON source**:
+## Viewing the Parquet data files
 
-- The **Copy path** (`pl_copy_monitor_container_window`) writes JSON Lines → plain Parquet with **no** `_delta_log/`, so its output is **not** federatable on its own.
-- The **Delta path** (`df_json_to_delta` / `pl_export_container_window_delta`) reads the **same** JSON Lines source and writes a Delta table directly, in one step. It does **not** read or convert the Copy path's Parquet files.
+The Delta table's data files are Parquet, a binary columnar format, so they cannot be read in a text editor. Visual Studio Code shows "The file is not displayed in the text editor because it is either binary or uses an unsupported text encoding." This is expected and is not caused by Snappy compression; uncompressed Parquet is also binary.
 
-Because federation only reads Delta tables, the plain-Parquet copy output always shows "No data available" in the connector; use the Delta path (or the sample Delta tables below) for federation.
-
-## Viewing Parquet Output
-
-Parquet is a binary columnar format, so the output files cannot be read in a text editor. Visual Studio Code shows "The file is not displayed in the text editor because it is either binary or uses an unsupported text encoding." This is expected and is not caused by Snappy compression; uncompressed Parquet is also binary.
-
-To inspect a Parquet file:
+To inspect a Parquet data file:
 
 - Install the `dvirtz.parquet-viewer` VS Code extension, which renders Parquet as JSON or CSV (supports Snappy; files up to 50 MB).
 - Or use the Azure Storage browser preview, Python (`pandas`/`pyarrow`), `parquet-tools`, or an analytics engine such as Synapse, Fabric, or Azure Data Explorer.
@@ -159,11 +114,10 @@ Compression trade-offs:
 
 - Snappy (this template's default): smaller files, faster analytics reads, native support in Sentinel, Spark, and Fabric. Not human-readable as text, but neither is uncompressed Parquet.
 - No compression: still binary and unreadable as text, while using more storage and slowing scans. Do not disable compression to make files readable.
-- Optional JSON/CSV debug copy: readable, but adds pipeline cost, extra storage, duplicate data, and loses the columnar benefits. Only consider this for targeted debugging.
 
 ## Sentinel Data Lake Federation
 
-To federate this Parquet output into the Microsoft Sentinel data lake using the Azure Data Lake Storage Gen2 connector:
+To federate this Delta output into the Microsoft Sentinel data lake using the Azure Data Lake Storage Gen2 connector:
 
 - Use the account endpoint as the connector URL, for example `https://<account>.dfs.core.windows.net/`. The connector rejects container or folder paths; it discovers tables from the folder layout inside the account.
 - The connector discovers one table per folder. With this layout, each container appears as a table with table path `<filesystem>/<table>`, where `<table>` is the container name with the `am-` prefix removed (for example, `sentinel-bcdr/signinlogs`).
@@ -172,9 +126,7 @@ To federate this Parquet output into the Microsoft Sentinel data lake using the 
 - Grant the connector's service principal the `Storage Blob Data Reader` role on the target storage account, enable Hierarchical namespace on the account, and grant the Sentinel platform identity (prefixed `msg-resources-`) access to the Key Vault secret.
 - The connector requires **Delta Parquet** format: each table folder must contain a `_delta_log/` transaction log alongside its `.snappy.parquet` data files. Plain Parquet with no `_delta_log/` is not discovered and the table shows "No data available". A `TimeGenerated` column enables enhanced lake features and preserves original event times; without it, federated rows are timestamped at query time.
 
-> **The current pipeline output is plain Parquet and is therefore not yet federatable.** Making the pipeline emit Delta (writing a `_delta_log/`) or adding a downstream convert step is a separate, deferred task. The sample tables below prove the Delta requirement independently of the pipeline.
-
-If federation shows "No data available" with zero tables, first confirm each table folder is a **Delta** table (it contains a `_delta_log/` subfolder) — plain Parquet alone is never discovered. Then confirm the output uses this layout (each container as a top-level folder, with no extra `targetRootPath` prefix and no `table=` segment), that the Parquet files sit directly under the `year=/month=/day=/` folders with no `WorkspaceResourceId=/subscriptions/.../` source path beneath them, and that the service principal has `Storage Blob Data Reader` on the account. A deep `WorkspaceResourceId=` path under each partition means the copy is mirroring the source hierarchy; redeploy the latest template, which sets `copyBehavior: FlattenHierarchy` to prevent that.
+If federation shows "No data available" with zero tables, confirm each table folder is a **Delta** table (it contains a `_delta_log/` subfolder) — plain Parquet alone is never discovered — that each container sits at the top level of the file system, that the connector URL is the account endpoint (not a container or folder path), and that the service principal has `Storage Blob Data Reader` on the account.
 
 ### Testing federation with sample Delta tables
 
@@ -217,15 +169,9 @@ Expect 5, 0, and 10 rows from `fedsample1`, `fedsample2`, and `fedsample3` respe
 
 ## Troubleshooting
 
-If the copy activity fails with `TypeConversionConnectorNotSupported` and mentions `JsonPathV2`, redeploy the latest template. JSON source files are treated as hierarchical data by Data Factory, and ADF type conversion is supported only for tabular data shapes. This template keeps the JSON-to-Parquet copy translator minimal so Data Factory does not enable unsupported type conversion for the JSON source.
+If a run spends several minutes on **Listing source** while reading only a handful of files, the source is enumerating the whole container. With the default `sourceWildcardFolderPath` (`WorkspaceResourceId=*`) and recursive listing, Data Factory walks every historical five-minute folder in the container before filtering by time, so listing time grows with the container's history. Set `sourceWorkspaceResourceId` to the exact path Azure Monitor writes after `WorkspaceResourceId=` (the workspace ARM ID, lowercased, beginning with `/subscriptions/`). The data flow source then lists only the processed hour's `y=/m=/d=/h=/` folder, so listing stays fast regardless of history. Copy the value from the storage browser to match its casing exactly; if a run lists zero files, clear the parameter to fall back to the wildcard path. This assumes a single workspace per source container.
 
-If the copy activity fails with `MaxRowsPerFileNotSupportSuchCopyBehavior`, redeploy the latest template. Data Factory does not allow `maxRowsPerFile` together with the `FlattenHierarchy` (or `mergeFiles`) copy behavior. This template needs `FlattenHierarchy` to drop the source `WorkspaceResourceId=` path, so it does not set `maxRowsPerFile`; output file size is bounded by the five-minute source export window instead. This template also does not set a file name prefix, so Data Factory auto-generates Parquet part file names inside each partition folder.
-
-If federation shows "No data available" and the storage browser shows Parquet files buried under a `.../day=.../WorkspaceResourceId=/subscriptions/<guid>/.../workspaces/<name>/y=/m=/d=/h=/m=/` path, the copy was mirroring the source blob hierarchy. Redeploy the latest template. The Parquet sink uses `copyBehavior: FlattenHierarchy`, which writes files directly into the descriptive `year=/month=/day=/[hour=/]` partitions and drops the source path. The `WorkspaceResourceId=` segment is an invalid Hive partition (its value contains `/` and a GUID), so the connector cannot discover partitions until it is gone.
-
-If a run spends several minutes on **Listing source** while reading only a handful of files, the source is enumerating the whole container. With the default `sourceWildcardFolderPath` (`WorkspaceResourceId=*`) and recursive listing, Data Factory walks every historical five-minute folder in the container before filtering by time, so listing time grows with the container's history. Set `sourceWorkspaceResourceId` to the exact path Azure Monitor writes after `WorkspaceResourceId=` (the workspace ARM ID, lowercased, beginning with `/subscriptions/`). The copy and delta sources then list only the processed hour's `y=/m=/d=/h=/` folder, so listing stays fast regardless of history. Copy the value from the storage browser to match its casing exactly; if a run lists zero files, clear the parameter to fall back to the wildcard path. This assumes a single workspace per source container.
-
-> **Manual runs need the value typed in.** A common cause of a slow manual run is leaving `sourceWorkspaceResourceId` blank in the **Debug** / **Trigger now** dialog. That dialog prefills from the pipeline's static defaults (empty), **not** from `azuredeploy.parameters.json`, so the source falls back to the `WorkspaceResourceId=*` wildcard and lists the whole container again. Type `sourceWorkspaceResourceId` into the dialog for manual runs, or use the scheduled trigger (`enableTrigger: true`), which passes the parameter-file value automatically. See [Supplying parameters for manual runs](#supplying-parameters-for-manual-runs).
+> **Manual runs of the single-container pipeline.** The discovery pipeline carries your deployed values, but a manual **Debug** of `pl_export_container_window_delta` uses that pipeline's static defaults, where `sourceWorkspaceResourceId` is empty. If you leave it blank there, the source falls back to the `WorkspaceResourceId=*` wildcard and lists the whole container. Type `sourceWorkspaceResourceId` into the dialog, or run the discovery pipeline or the schedule instead. See [Supplying parameters for manual runs](#supplying-parameters-for-manual-runs).
 
 If a later run fails with an authorization error, confirm the Data Factory managed identity has the post-deployment RBAC assignments above. For ADLS Gen2 accounts with hierarchical namespace ACLs, also confirm the identity has execute permission on parent folders and write permission on the target path.
 
@@ -243,7 +189,7 @@ Before running the pipeline for every exported table, you can test it on a few. 
 How to test:
 
 1. Set `tableAllowList` to one or two small tables and keep `enableTrigger` set to `false`.
-2. Deploy the template, then run `pl_discover_and_export_azmon_to_parquet` manually from the Data Factory Studio (**Author → pipeline → Debug** or **Add trigger → Trigger now**).
+2. Deploy the template, then run `pl_discover_and_export_azmon_to_delta` manually from the Data Factory Studio (**Author → pipeline → Debug** or **Add trigger → Trigger now**).
 3. Confirm only the allow-listed tables produced output in the target container.
 4. When you are happy, clear `tableAllowList` (empty) and set `enableTrigger` to `true` to process all tables on the hourly schedule.
 
@@ -251,27 +197,22 @@ Restricting the table list during testing also keeps cost low, because the large
 
 ### Supplying parameters for manual runs
 
-`azuredeploy.parameters.json` is read **only at deployment time, and it only feeds the scheduled trigger.** The pipelines are deployed as fixed definitions, so deployment values are **not** injected into the pipelines' own parameter defaults. As a result:
+At deployment, the parameter-file values are baked into the discovery pipeline (`pl_discover_and_export_azmon_to_delta`) as its parameter defaults, and the schedule trigger passes nothing. So both the scheduled run and a manual **Debug** or **Trigger now** of the discovery pipeline use your deployed values automatically — including `sourceWorkspaceResourceId` and `tableAllowList` — with nothing to type.
 
-- A **scheduled** run (from the trigger created when `enableTrigger` is `true`) receives every value from `azuredeploy.parameters.json` automatically.
-- A **manual** run (**Debug** or **Add trigger → Trigger now**) prefills its dialog from the **pipeline's static defaults**, not from `azuredeploy.parameters.json`. Parameters whose default is empty — such as `sourceWorkspaceResourceId`, `hourlyTables`, and `tableAllowList` — show up blank in the dialog even if you set them in the parameters file.
+The single-container pipeline `pl_export_container_window_delta` keeps static defaults so it can be run ad hoc. If you Debug it directly, set `sourceWorkspaceResourceId` (so source listing stays fast), `containerName` (the full `am-` name), and the window in the run dialog. Leave `sourceFolderPath` at its default `WorkspaceResourceId=*` — it is ignored when `sourceWorkspaceResourceId` is set.
 
-This matters most for `sourceWorkspaceResourceId`: if you leave it blank in a manual run, the source falls back to the `WorkspaceResourceId=*` wildcard and lists the whole container, which can take many minutes (see the listing troubleshooting note below). For a fast manual run:
+To change any deployed value, edit `azuredeploy.parameters.json` and redeploy.
 
-- Type `sourceWorkspaceResourceId` into the run dialog (the same value as in `azuredeploy.parameters.json`, for example `/subscriptions/<subscription-id>/resourcegroups/<resource-group>/providers/microsoft.operationalinsights/workspaces/<workspace-name>`). Leave `sourceFolderPath` at its default `WorkspaceResourceId=*` — it is ignored when `sourceWorkspaceResourceId` is set.
-- The same applies to a manual **Debug** run of `pl_export_container_window_delta`: type `sourceWorkspaceResourceId`, `containerName` (the full `am-` name), and the window into its dialog.
-- For hands-off operation, deploy with `enableTrigger` set to `true`; the scheduled trigger then passes all parameter-file values on every run, with nothing to type.
-- If you run pipelines manually often, you can edit the pipeline's **Parameters** tab defaults in your own factory in Studio so the dialog prefills them. Note that redeploying the template resets those defaults to empty.
+## How the Delta output works
 
-## Delta output for federation (Option A)
+The Sentinel data lake connector only reads **Delta** tables (a folder with a `_delta_log/`). This template produces Delta directly with a **Mapping Data Flow**, keeping everything inside Data Factory (no extra Function or Databricks resource) and letting ADF manage the `_delta_log`, file compaction (Optimized Write / Auto Compact), and schema evolution.
 
-The Sentinel data lake connector only reads **Delta** tables (a folder with a `_delta_log/`). The Copy activity in this template writes plain Parquet, which is not federatable on its own, so this template also ships the **Option A** approach: a **Mapping Data Flow** that writes Delta directly. It keeps everything inside Data Factory (no extra Function or Databricks resource) and lets ADF manage the `_delta_log`, file compaction (Optimized Write / Auto Compact), and schema evolution.
-
-The Delta components are **opt-in** so they never affect the proven Parquet path. Set `deployDeltaDataFlow` to `true` to deploy:
+The Delta components are:
 
 - **`df_json_to_delta`** — a generic, schema-drift Mapping Data Flow: reads the JSON-lines export and writes a flat (unpartitioned) **Delta** table per `am-`-stripped container. A flat layout matches the table structure the federation connector reads (one `_delta_log/` plus data files at the table root, like the `federation-samples/` tables). Date partitioning is intentionally omitted because the connector does not require it and partitioning a schema-drift stream by only its derived columns is rejected by the Delta sink.
 - **`ir-dataflow-warm`** — a custom Azure Integration Runtime (serverless Spark) sized by `dataFlowCoreCount` with a `dataFlowTimeToLiveMinutes` warm pool, so hourly runs reuse one cluster instead of paying the cold-start each time.
 - **`pl_export_container_window_delta`** — a pipeline that runs the data flow for one container/window on the warm runtime.
+- **`pl_discover_and_export_azmon_to_delta`** — the master pipeline that discovers `am-*` containers and runs the export for each.
 
 ### Why a warm Integration Runtime
 
@@ -281,7 +222,7 @@ A Mapping Data Flow runs on a Spark cluster. A **cold** cluster takes about 3–
 
 A Mapping Data Flow is a Spark job written in ADF's data-flow script language. The definition in this template is a working starting point but **must be validated in a Data Factory Studio debug session** before you rely on it, because the exact source/sink script options can need small adjustments for your data.
 
-1. Deploy with `deployDeltaDataFlow` set to `true`.
+1. Deploy the template.
 2. In Data Factory Studio, open **Author → Data flows → `df_json_to_delta`**.
 3. Turn on the **Data flow debug** slider (top bar). This starts an interactive debug Spark cluster (billed per hour while on — turn it off when done).
 4. Use **Data preview** on each step (source → sink) to confirm the schema looks right. Fix any flagged script options.
@@ -315,23 +256,17 @@ There are no debug *files* written to the storage account — data flow logs liv
 
 ### Running on a permanent hourly schedule
 
-The Delta path has its own discovery pipeline and schedule, wired the same way as the Parquet path:
+Two resources drive the schedule:
 
 - **`pl_discover_and_export_azmon_to_delta`** discovers the matching `am-*` containers and runs `pl_export_container_window_delta` for each one.
 - **`tr_hourly_discover_and_export_azmon_to_delta`** runs that pipeline on the hourly schedule.
 
-`deployDeltaDataFlow` selects which format the schedule uses, so only one trigger is ever active:
+To run the export every hour, permanently:
 
-- `deployDeltaDataFlow: true` → the **Delta** trigger is created (federatable output); the Parquet trigger is not.
-- `deployDeltaDataFlow: false` → the **Parquet** trigger is created and no Delta components are deployed.
-
-To run the federatable Delta export every hour, permanently:
-
-1. Keep `deployDeltaDataFlow` set to `true` (it selects the Delta schedule).
-2. Set `enableTrigger` to `true` to create the hourly trigger.
-3. *(Optional)* Limit the run to specific tables with `tableAllowList` — see [Limiting the scheduled run to specific tables](#limiting-the-scheduled-run-to-specific-tables).
-4. Redeploy the template.
-5. **Start the trigger.** Resource Manager deploys triggers in a stopped state, so start it once after deployment:
+1. Set `enableTrigger` to `true` to create the hourly trigger.
+2. *(Optional)* Limit the run to specific tables with `tableAllowList` — see [Limiting the scheduled run to specific tables](#limiting-the-scheduled-run-to-specific-tables).
+3. Redeploy the template.
+4. **Start the trigger.** Resource Manager deploys triggers in a stopped state, so start it once after deployment:
    - Studio: **Manage → Triggers → `tr_hourly_discover_and_export_azmon_to_delta` → Start**, then **Publish**.
    - Or Azure CLI:
 
@@ -341,11 +276,11 @@ To run the federatable Delta export every hour, permanently:
        --factory-name <data-factory-name> \
        --name tr_hourly_discover_and_export_azmon_to_delta
      ```
-6. Verify in **Monitor → Trigger runs** that it fires each hour, that `_delta_log/` updates in each table folder, and that the federated tables refresh in the Sentinel data lake.
+5. Verify in **Monitor → Trigger runs** that it fires each hour, that `_delta_log/` updates in each table folder, and that the federated tables refresh in the Sentinel data lake.
 
 Each run processes the previous complete hour: at run time *T* it reads the window *[T − 2h, T − 1h)* (with `processingDelayHours: 1`), which gives Azure Monitor time to finish exporting that hour. Scheduled runs pass `sourceWorkspaceResourceId` automatically, so source listing stays fast — unlike a manual run, where you must type it (see [Supplying parameters for manual runs](#supplying-parameters-for-manual-runs)).
 
-The Delta discovery pipeline fans out with a `ForEach` `batchCount` of 4 (lower than the Parquet path's 16), because each Delta export runs a Spark data flow on the warm Integration Runtime and a high concurrency would start many Spark clusters at once. Adjust it in the `pl_discover_and_export_azmon_to_delta` pipeline definition to trade compute cost against how quickly the hourly run completes.
+The discovery pipeline fans out with a `ForEach` `batchCount` of 4, because each export runs a Spark data flow on the warm Integration Runtime and a high concurrency would start many Spark clusters at once. Adjust it in the `pl_discover_and_export_azmon_to_delta` pipeline definition to trade compute cost against how quickly the hourly run completes.
 
 ### Limiting the scheduled run to specific tables
 
@@ -356,6 +291,34 @@ To run the schedule for only some tables, set `tableAllowList` to a comma-separa
 "tableAllowList": { "value": "am-signinlogs,am-microsoftgraphactivitylogs" }, // only these tables
 "tableAllowList": { "value": "" }                                              // all tables (default)
 ```
+
+
+
+## Parameters
+
+| Parameter | Required | Description | Example |
+| --- | --- | --- | --- |
+| `dataFactoryName` | Yes | Name of the Azure Data Factory to create. Must be globally unique for Data Factory. | `<data-factory-name>` |
+| `location` | No | Azure region for the Data Factory. Defaults to the deployment resource group's location when omitted. | `eastus` |
+| `sourceStorageAccountUrl` | Yes | Blob service endpoint for the Azure Monitor Data Export source account. | `https://<source-storage-account>.blob.core.windows.net` |
+| `sourceStorageAccountResourceId` | Yes | ARM resource ID of the source storage account. Used by the master pipeline to list containers. | `/subscriptions/<subscription-id>/resourceGroups/<source-resource-group>/providers/Microsoft.Storage/storageAccounts/<source-storage-account>` |
+| `targetStorageAccountUrl` | Yes | DFS endpoint for the target ADLS Gen2 account. | `https://<target-storage-account>.dfs.core.windows.net` |
+| `targetFileSystem` | No | Target ADLS Gen2 file system/container name. | `sentinel-bcdr` |
+| `sourceContainerPrefix` | No | Prefix used to select source containers. Azure Monitor export containers commonly use `am-`. | `am-` |
+| `sourceWildcardFolderPath` | No | Wildcard folder path below each source container. Used when `sourceWorkspaceResourceId` is empty. | `WorkspaceResourceId=*` |
+| `sourceWorkspaceResourceId` | No | Exact value Azure Monitor writes after `WorkspaceResourceId=` in the source path (the workspace ARM ID, lowercased, beginning with `/subscriptions/`). When set, sources list only the processed hour folder instead of the whole container, keeping listing fast as history grows. Leave empty to scan the whole container. Single-workspace assumption; casing must match the storage browser exactly. | `/subscriptions/<subscription-id>/resourcegroups/<resource-group>/providers/microsoft.operationalinsights/workspaces/<workspace-name>` |
+| `sourceFilePattern` | No | File pattern for source export blobs. | `PT5M*.json` |
+| `triggerFrequency` | No | Schedule trigger frequency. Allowed values: `Minute`, `Hour`, `Day`, `Week`. | `Hour` |
+| `triggerInterval` | No | Schedule trigger interval. Must be at least `1`. | `1` |
+| `triggerStartTimeUtc` | No | UTC start time for the schedule trigger. Leave empty to use a default anchor (the trigger still fires on the next hour boundary). | `2026-06-04T00:00:00Z` |
+| `enableTrigger` | No | Set to `true` to create the hourly schedule trigger. Leave `false` to deploy without a schedule and run the pipeline manually (recommended while testing). The trigger is deployed stopped; start it once after deployment. | `false` |
+| `processingDelayHours` | No | Hours to wait before processing. Default processes the previous complete hour. | `1` |
+| `tableAllowList` | No | Comma-separated source container names to process. Leave empty to process all containers matching `sourceContainerPrefix`. Use it to test on a few tables before running everything. | `am-signinlogs,am-microsoftgraphactivitylogs` |
+| `dataFlowCoreCount` | No | Spark cores for the warm data flow Integration Runtime. `8` is cheapest; `16` is the recommended production minimum. | `8` |
+| `dataFlowTimeToLiveMinutes` | No | Warm-cluster time-to-live in minutes for the data flow Integration Runtime. Keeps the Spark cluster warm between hourly runs. `0` disables the warm pool. | `10` |
+| `logAnalyticsWorkspaceId` | No | Optional Log Analytics workspace resource ID for Data Factory diagnostics. Leave empty to disable diagnostics. | `/subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.OperationalInsights/workspaces/<workspace-name>` |
+| `tags` | No | Tags applied to the Data Factory. | `{ "workload": "sentinel-bcdr" }` |
+
 
 ## Cost estimations
 

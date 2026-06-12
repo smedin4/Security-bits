@@ -20,9 +20,6 @@
     "targetFileSystem": {
       "value": "sentinel-bcdr"
     },
-    "targetRootPath": {
-      "value": ""
-    },
     "sourceContainerPrefix": {
       "value": "am-"
     },
@@ -47,17 +44,11 @@
     "processingDelayHours": {
       "value": 1
     },
-    "hourlyTables": {
-      "value": "am-microsoftgraphactivitylogs"
-    },
     "tableAllowList": {
       "value": ""
     },
     "enableTrigger": {
       "value": false
-    },
-    "deployDeltaDataFlow": {
-      "value": true
     },
     "dataFlowCoreCount": {
       "value": 8

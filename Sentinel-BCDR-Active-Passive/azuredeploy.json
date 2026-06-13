@@ -47,6 +47,13 @@
         "description": "Target ADLS Gen2 file system/container name."
       }
     },
+    "metadataFileSystem": {
+      "type": "string",
+      "defaultValue": "sentinel-bcdr",
+      "metadata": {
+        "description": "ADLS Gen2 file system on the target account where pipeline metadata is written. The daily schema-refresh pipeline writes the workspace table schema under a _raw/ folder here. Defaults to the same file system as the Delta output; set a separate file system (for example sentinel-bcdr-metadata) to keep metadata out of the federation file system. The file system must already exist."
+      }
+    },
     "sourceContainerPrefix": {
       "type": "string",
       "defaultValue": "am-",
@@ -214,6 +221,93 @@
       },
       "dependsOn": [
         "[resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.DataFactory/factories/linkedservices",
+      "apiVersion": "2018-06-01",
+      "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'ls_arm_management')]",
+      "properties": {
+        "type": "RestService",
+        "annotations": [
+          "sentinel-bcdr",
+          "metadata"
+        ],
+        "typeProperties": {
+          "url": "https://management.azure.com",
+          "enableServerCertificateValidation": true,
+          "authenticationType": "ManagedServiceIdentity",
+          "aadResourceId": "https://management.azure.com/"
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.DataFactory/factories/datasets",
+      "apiVersion": "2018-06-01",
+      "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'ds_arm_workspace_tables')]",
+      "properties": {
+        "type": "RestResource",
+        "annotations": [
+          "sentinel-bcdr",
+          "metadata"
+        ],
+        "linkedServiceName": {
+          "referenceName": "ls_arm_management",
+          "type": "LinkedServiceReference"
+        },
+        "parameters": {
+          "workspaceResourceId": {
+            "type": "String"
+          }
+        },
+        "typeProperties": {
+          "relativeUrl": "@{concat(dataset().workspaceResourceId, '/tables?api-version=2022-10-01')}"
+        },
+        "schema": []
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName'))]",
+        "[resourceId('Microsoft.DataFactory/factories/linkedservices', parameters('dataFactoryName'), 'ls_arm_management')]"
+      ]
+    },
+    {
+      "type": "Microsoft.DataFactory/factories/datasets",
+      "apiVersion": "2018-06-01",
+      "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'ds_metadata_raw_json')]",
+      "properties": {
+        "type": "Json",
+        "annotations": [
+          "sentinel-bcdr",
+          "metadata"
+        ],
+        "linkedServiceName": {
+          "referenceName": "ls_target_bcdr_adlsgen2",
+          "type": "LinkedServiceReference"
+        },
+        "parameters": {
+          "fileSystem": {
+            "type": "String"
+          },
+          "fileName": {
+            "type": "String"
+          }
+        },
+        "typeProperties": {
+          "location": {
+            "type": "AzureBlobFSLocation",
+            "fileName": "@dataset().fileName",
+            "fileSystem": "@dataset().fileSystem",
+            "folderPath": "_raw"
+          }
+        },
+        "schema": {}
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName'))]",
+        "[resourceId('Microsoft.DataFactory/factories/linkedservices', parameters('dataFactoryName'), 'ls_target_bcdr_adlsgen2')]"
       ]
     },
     {
@@ -535,8 +629,84 @@
         "[resourceId('Microsoft.DataFactory/factories/pipelines', parameters('dataFactoryName'), 'pl_export_container_window_delta')]"
       ]
     },
-    {
-      "condition": "[or(parameters('enableTrigger'), not(empty(parameters('triggerStartTimeUtc'))))]",
+    {      "type": "Microsoft.DataFactory/factories/pipelines",
+      "apiVersion": "2018-06-01",
+      "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'pl_refresh_table_schemas')]",
+      "properties": {
+        "description": "Read the Log Analytics workspace table schema (declared column types, including dynamic) from the Azure Resource Manager Tables API and write it to the target so the export can later cast string columns back to their native types. Run daily; the export pipeline does not depend on it. Requires Reader on the workspace for the Data Factory managed identity.",
+        "parameters": {
+          "sourceWorkspaceResourceId": {
+            "type": "String",
+            "defaultValue": "[parameters('sourceWorkspaceResourceId')]"
+          },
+          "metadataFileSystem": {
+            "type": "String",
+            "defaultValue": "[parameters('metadataFileSystem')]"
+          }
+        },
+        "activities": [
+          {
+            "name": "CopyWorkspaceTablesSchema",
+            "type": "Copy",
+            "dependsOn": [],
+            "policy": {
+              "timeout": "0.00:10:00",
+              "retry": 2,
+              "retryIntervalInSeconds": 30,
+              "secureOutput": false,
+              "secureInput": false
+            },
+            "typeProperties": {
+              "source": {
+                "type": "RestSource",
+                "httpRequestTimeout": "00:01:40",
+                "requestInterval": "00.00:00:00.010",
+                "requestMethod": "GET"
+              },
+              "sink": {
+                "type": "JsonSink",
+                "storeSettings": {
+                  "type": "AzureBlobFSWriteSettings"
+                },
+                "formatSettings": {
+                  "type": "JsonWriteSettings"
+                }
+              },
+              "enableStaging": false
+            },
+            "inputs": [
+              {
+                "referenceName": "ds_arm_workspace_tables",
+                "type": "DatasetReference",
+                "parameters": {
+                  "workspaceResourceId": "@pipeline().parameters.sourceWorkspaceResourceId"
+                }
+              }
+            ],
+            "outputs": [
+              {
+                "referenceName": "ds_metadata_raw_json",
+                "type": "DatasetReference",
+                "parameters": {
+                  "fileSystem": "@pipeline().parameters.metadataFileSystem",
+                  "fileName": "workspace-tables.json"
+                }
+              }
+            ]
+          }
+        ],
+        "annotations": [
+          "sentinel-bcdr",
+          "metadata"
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName'))]",
+        "[resourceId('Microsoft.DataFactory/factories/datasets', parameters('dataFactoryName'), 'ds_arm_workspace_tables')]",
+        "[resourceId('Microsoft.DataFactory/factories/datasets', parameters('dataFactoryName'), 'ds_metadata_raw_json')]"
+      ]
+    },
+    {      "condition": "[or(parameters('enableTrigger'), not(empty(parameters('triggerStartTimeUtc'))))]",
       "type": "Microsoft.DataFactory/factories/triggers",
       "apiVersion": "2018-06-01",
       "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'tr_hourly_discover_and_export_azmon_to_delta')]",
@@ -567,6 +737,40 @@
       "dependsOn": [
         "[resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName'))]",
         "[resourceId('Microsoft.DataFactory/factories/pipelines', parameters('dataFactoryName'), 'pl_discover_and_export_azmon_to_delta')]"
+      ]
+    },
+    {
+      "condition": "[or(parameters('enableTrigger'), not(empty(parameters('triggerStartTimeUtc'))))]",
+      "type": "Microsoft.DataFactory/factories/triggers",
+      "apiVersion": "2018-06-01",
+      "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'tr_daily_refresh_table_schemas')]",
+      "properties": {
+        "annotations": [
+          "sentinel-bcdr",
+          "metadata"
+        ],
+        "pipelines": [
+          {
+            "pipelineReference": {
+              "referenceName": "pl_refresh_table_schemas",
+              "type": "PipelineReference"
+            },
+            "parameters": {}
+          }
+        ],
+        "type": "ScheduleTrigger",
+        "typeProperties": {
+          "recurrence": {
+            "frequency": "Day",
+            "interval": 1,
+            "startTime": "[if(empty(parameters('triggerStartTimeUtc')), '2026-01-01T00:00:00Z', parameters('triggerStartTimeUtc'))]",
+            "timeZone": "UTC"
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName'))]",
+        "[resourceId('Microsoft.DataFactory/factories/pipelines', parameters('dataFactoryName'), 'pl_refresh_table_schemas')]"
       ]
     },
     {
@@ -619,6 +823,10 @@
     "targetStorageRoleRequired": {
       "type": "string",
       "value": "Grant Storage Blob Data Contributor to the Data Factory managed identity on the target ADLS Gen2 account or file system."
+    },
+    "workspaceRoleRequired": {
+      "type": "string",
+      "value": "Grant Reader to the Data Factory managed identity on the Log Analytics workspace so the daily schema-refresh pipeline can read declared table column types from the Azure Resource Manager Tables API (metadata only). Only needed if you run pl_refresh_table_schemas."
     }
   }
 }

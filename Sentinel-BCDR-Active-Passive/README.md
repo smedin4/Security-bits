@@ -55,15 +55,31 @@ The `Storage Blob Data Reader` role is required to read source blobs.
 
 The `Storage Blob Data Contributor` role is required to write Delta output to the target ADLS Gen2 account or file system.
 
+The `Reader` role on the **Log Analytics workspace** is required only if you run the daily schema-refresh pipeline (`pl_refresh_table_schemas`). It lets the managed identity read declared table column types from the Azure Resource Manager Tables API (metadata only — it does not grant access to log data). See [Native column types (schema refresh)](#native-column-types-schema-refresh).
+
 ```powershell
 $principalId = "<data-factory-principal-id>"
 $sourceScope = "/subscriptions/<subscription-id>/resourceGroups/<source-resource-group>/providers/Microsoft.Storage/storageAccounts/<source-storage-account>"
 $targetScope = "/subscriptions/<subscription-id>/resourceGroups/<target-resource-group>/providers/Microsoft.Storage/storageAccounts/<target-storage-account>"
+$workspaceScope = "/subscriptions/<subscription-id>/resourceGroups/<workspace-resource-group>/providers/Microsoft.OperationalInsights/workspaces/<workspace-name>"
 
 az role assignment create --assignee-object-id $principalId --assignee-principal-type ServicePrincipal --role Reader --scope $sourceScope
 az role assignment create --assignee-object-id $principalId --assignee-principal-type ServicePrincipal --role "Storage Blob Data Reader" --scope $sourceScope
 az role assignment create --assignee-object-id $principalId --assignee-principal-type ServicePrincipal --role "Storage Blob Data Contributor" --scope $targetScope
+az role assignment create --assignee-object-id $principalId --assignee-principal-type ServicePrincipal --role Reader --scope $workspaceScope
 ```
+
+## Native column types (schema refresh)
+
+By default the export reads every column as **string** (`inferDriftedColumnTypes: false`), which is the only deterministic choice for a single generic flow: Azure Monitor JSON is schema-on-read, so the same column can infer as different types across files (Short vs Long, Boolean vs String), and `dynamic` columns hold arbitrary JSON. Reading everything as string guarantees the Delta schema never conflicts. The trade-off is that analysts cast at query time (`toint()`, `tolong()`, `tobool()`, `parse_json()`).
+
+To give analysts **native types** without casting, the template includes a schema-refresh path that reads the workspace's **declared** column types (which are stable) and uses them to cast the string columns back. It is built in stages:
+
+1. **Schema collection (included).** `pl_refresh_table_schemas` calls the Azure Resource Manager Tables API for the workspace and writes the response to `_raw/workspace-tables.json` in `metadataFileSystem`. `tr_daily_refresh_table_schemas` runs it daily. This needs **Reader on the workspace** (above). Run it once and confirm the file appears before relying on it.
+2. **Bucketing (next).** A data flow reads `_raw/workspace-tables.json` and writes one `_schemas/<table>.json` per table listing which columns are `long`, `double`, `boolean`, and `timestamp` (everything else, including `dynamic`, stays string). This data flow is best authored and validated in a Data Factory Studio debug session.
+3. **Cast-back (next).** `df_json_to_delta` looks up `_schemas/<table>.json` for the table being written and casts those columns from string to their native type; `dynamic` columns remain JSON strings (query with `parse_json()`). When no schema file exists yet, the export stays all-string, so the cast-back is safe to add incrementally.
+
+The declared types do not change between runs, so this produces native types with no schema-merge conflicts — and it stays entirely within Data Factory (no Azure Function or Databricks).
 
 ## Output Layout
 

@@ -270,6 +270,9 @@
           ],
           "transformations": [
             {
+              "name": "WidenNums"
+            },
+            {
               "name": "AddMeta"
             }
           ],
@@ -283,13 +286,16 @@
             "}",
             "source(allowSchemaDrift: true,",
             "\tvalidateSchema: false,",
-            "\tinferDriftedColumnTypes: false,",
+            "\tinferDriftedColumnTypes: true,",
             "\tignoreNoFilesFound: true,",
             "\tformat: 'json',",
             "\tcontainer: ($containerName),",
             "\twildcardPaths: [(concat($sourceFolderPath, '/**/', $sourceFilePattern))],",
             "\tdocumentForm: 'documentPerLine') ~> SourceJson",
-            "SourceJson derive(IngestedUtc = currentUTC()) ~> AddMeta",
+            "SourceJson derive(each(match(type=='integer'||type=='short'), $$ = toLong($$)),",
+            "\t\teach(match(type=='float'), $$ = toDouble($$))) ~> WidenNums",
+            "WidenNums derive(each(match(name=='ResultType'), $$ = toString($$)),",
+            "\t\tIngestedUtc = currentUTC()) ~> AddMeta",
             "AddMeta sink(allowSchemaDrift: true,",
             "\tvalidateSchema: false,",
             "\tformat: 'delta',",

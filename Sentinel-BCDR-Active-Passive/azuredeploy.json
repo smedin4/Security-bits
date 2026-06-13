@@ -270,12 +270,6 @@
           ],
           "transformations": [
             {
-              "name": "WidenNums"
-            },
-            {
-              "name": "PinPoly"
-            },
-            {
               "name": "AddMeta"
             }
           ],
@@ -289,16 +283,13 @@
             "}",
             "source(allowSchemaDrift: true,",
             "\tvalidateSchema: false,",
-            "\tinferDriftedColumnTypes: true,",
+            "\tinferDriftedColumnTypes: false,",
             "\tignoreNoFilesFound: true,",
             "\tformat: 'json',",
             "\tcontainer: ($containerName),",
             "\twildcardPaths: [(concat($sourceFolderPath, '/**/', $sourceFilePattern))],",
             "\tdocumentForm: 'documentPerLine') ~> SourceJson",
-            "SourceJson derive(each(match(type=='integer'||type=='short'), $$ = toLong($$)),",
-            "\t\teach(match(type=='float'), $$ = toDouble($$))) ~> WidenNums",
-            "WidenNums derive(each(match(name=='ResultType'), $$ = toString($$))) ~> PinPoly",
-            "PinPoly derive(IngestedUtc = currentUTC()) ~> AddMeta",
+            "SourceJson derive(IngestedUtc = currentUTC()) ~> AddMeta",
             "AddMeta sink(allowSchemaDrift: true,",
             "\tvalidateSchema: false,",
             "\tformat: 'delta',",

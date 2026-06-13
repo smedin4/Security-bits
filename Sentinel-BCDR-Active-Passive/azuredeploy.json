@@ -283,7 +283,7 @@
             "}",
             "source(allowSchemaDrift: true,",
             "\tvalidateSchema: false,",
-            "\tinferDriftedColumnTypes: true,",
+            "\tinferDriftedColumnTypes: false,",
             "\tignoreNoFilesFound: true,",
             "\tformat: 'json',",
             "\tcontainer: ($containerName),",

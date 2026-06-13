@@ -289,7 +289,7 @@
             "\tcontainer: ($containerName),",
             "\twildcardPaths: [(concat($sourceFolderPath, '/**/', $sourceFilePattern))],",
             "\tdocumentForm: 'documentPerLine') ~> SourceJson",
-            "SourceJson derive(_IngestedUtc = currentUTC()) ~> AddMeta",
+            "SourceJson derive(IngestedUtc = currentUTC()) ~> AddMeta",
             "AddMeta sink(allowSchemaDrift: true,",
             "\tvalidateSchema: false,",
             "\tformat: 'delta',",

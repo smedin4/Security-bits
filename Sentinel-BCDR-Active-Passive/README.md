@@ -171,6 +171,8 @@ Expect 5, 0, and 10 rows from `fedsample1`, `fedsample2`, and `fedsample3` respe
 
 If the discovery pipeline **succeeds but the target container is empty** (no `_delta_log/` or Parquet files appear), the `ForEach` ran zero iterations because discovery found no `am-*` containers. In Monitor, the run shows `ListSourceContainers` and `FilterMatchingContainers` succeeding and `ForEachMatchingContainer` finishing in under a second with **no** `ExportContainerWindowDelta` child. The usual cause is `sourceStorageAccountResourceId` pointing at the wrong account — most often the **target** ADLS Gen2 account instead of the source. It must be the **source** account that holds the `am-*` export containers, the **same account** as `sourceStorageAccountUrl`. Fix the value (keep both pointing at the same account), confirm the Data Factory managed identity has **Reader** on that source account (required for the Azure Resource Manager container listing) plus **Storage Blob Data Reader**, then redeploy and rerun. (A wrong account that the identity cannot read fails loudly with an authorization error instead; a wrong-but-readable account, such as the target, silently lists zero `am-*` containers.)
 
+If some `ExportContainerWindowDelta` activities fail with `DF-Executor-InvalidOutputColumns` ("at Sink 'DeltaSink': The result has 0 output columns. Please ensure at least one column is mapped"), the affected tables had **no `PT5M` files in the processed hour**. The data flow source uses schema drift with no fixed columns, so an empty hour produces a stream with zero columns, and the Delta sink rejects an empty schema. The template avoids this by deriving an always-present `_IngestedUtc` column (the UTC time the rows were written) before the sink, so the output schema is never empty: a quiet hour writes an empty (0-row) Delta commit instead of failing. If you still hit this error, redeploy the latest template. `_IngestedUtc` is the processing time, not the event time — use the source `TimeGenerated` column for event-time queries.
+
 If a run spends several minutes on **Listing source** while reading only a handful of files, the source is enumerating the whole container. With the default `sourceWildcardFolderPath` (`WorkspaceResourceId=*`) and recursive listing, Data Factory walks every historical five-minute folder in the container before filtering by time, so listing time grows with the container's history. Set `sourceWorkspaceResourceId` to the exact path Azure Monitor writes after `WorkspaceResourceId=` (the workspace ARM ID, lowercased, beginning with `/subscriptions/`). The data flow source then lists only the processed hour's `y=/m=/d=/h=/` folder, so listing stays fast regardless of history. Copy the value from the storage browser to match its casing exactly; if a run lists zero files, clear the parameter to fall back to the wildcard path. This assumes a single workspace per source container.
 
 > **Manual runs of the single-container pipeline.** The discovery pipeline carries your deployed values, but a manual **Debug** of `pl_export_container_window_delta` uses that pipeline's static defaults, where `sourceWorkspaceResourceId` is empty. If you leave it blank there, the source falls back to the `WorkspaceResourceId=*` wildcard and lists the whole container. Type `sourceWorkspaceResourceId` into the dialog, or run the discovery pipeline or the schedule instead. See [Supplying parameters for manual runs](#supplying-parameters-for-manual-runs).
@@ -202,6 +204,24 @@ Restricting the table list during testing also keeps cost low, because the large
 At deployment, the parameter-file values are baked into the discovery pipeline (`pl_discover_and_export_azmon_to_delta`) as its parameter defaults, and the schedule trigger passes nothing. So both the scheduled run and a manual **Debug** or **Trigger now** of the discovery pipeline use your deployed values automatically — including `sourceWorkspaceResourceId` and `tableAllowList` — with nothing to type.
 
 The single-container pipeline `pl_export_container_window_delta` keeps static defaults so it can be run ad hoc. If you Debug it directly, set `sourceWorkspaceResourceId` (so source listing stays fast), `containerName` (the full `am-` name), and the window in the run dialog. Leave `sourceFolderPath` at its default `WorkspaceResourceId=*` — it is ignored when `sourceWorkspaceResourceId` is set.
+
+### Manual runs and duplicate rows
+
+The Delta sink is **append-only** (it inserts rows; it does not update, delete, or upsert). Each run re-reads the `PT5M` source files for the container and window it is given and **appends** them to the table. So reprocessing the **same table and the same hour** writes those rows **again, as duplicates**. This happens if you:
+
+- run a manual export for an hour the hourly schedule also processes, or
+- run the same manual export (or rerun an activity) more than once for the same window.
+
+The scheduled runs do not duplicate each other, because each hourly run processes a different one-hour window exactly once. Duplicates only come from **reprocessing the same window**. Note that `VACUUM` and the `skipDuplicateMap*` sink options do **not** remove duplicate rows — they manage files and column mapping, not row de-duplication.
+
+Easy ways to test without polluting your real tables:
+
+- **Use a separate target file system.** Set `targetFileSystem` to something like `sentinel-bcdr-test` for the test run, then delete it afterward. Your production `sentinel-bcdr` tables are untouched.
+- **Test a throwaway table.** Set `tableAllowList` to one low-value table, and delete that table's folder from the target when you are done.
+- **Pick an old window the schedule will not run**, then delete the affected `<table>/` Delta folder afterward.
+- **If a table did get duplicates**, the simplest reset is to delete that table's folder (including its `_delta_log/`) in the target and let the next scheduled run rebuild from that hour onward.
+
+For true idempotency (so reruns never duplicate), the sink would need to **upsert keyed on `_ItemId`** — the unique per-record ID that Azure Monitor stamps on every exported row — instead of appending. That is a larger change (it makes Delta match and overwrite existing rows, which is heavier and needs the key validated against your tables), so it is intentionally not enabled by default; treat each window as processed once and avoid reprocessing.
 
 To change any deployed value, edit `azuredeploy.parameters.json` and redeploy.
 

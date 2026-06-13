@@ -268,7 +268,11 @@
               }
             }
           ],
-          "transformations": [],
+          "transformations": [
+            {
+              "name": "AddMeta"
+            }
+          ],
           "scriptLines": [
             "parameters{",
             "\tcontainerName as string,",
@@ -285,7 +289,8 @@
             "\tcontainer: ($containerName),",
             "\twildcardPaths: [(concat($sourceFolderPath, '/**/', $sourceFilePattern))],",
             "\tdocumentForm: 'documentPerLine') ~> SourceJson",
-            "SourceJson sink(allowSchemaDrift: true,",
+            "SourceJson derive(_IngestedUtc = currentUTC()) ~> AddMeta",
+            "AddMeta sink(allowSchemaDrift: true,",
             "\tvalidateSchema: false,",
             "\tformat: 'delta',",
             "\tfileSystem: ($targetFileSystem),",

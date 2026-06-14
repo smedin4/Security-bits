@@ -11,6 +11,7 @@
 # Workspace table schema dumps fetched from a real environment for reference
 # (contain table/column metadata from a specific Log Analytics workspace).
 **/workspace-tables.json
+**/workspace-schemas.json
 
 # Exception: this SOAR parameters file is a committed sample with placeholder
 # values only (Contoso), so keep it tracked.

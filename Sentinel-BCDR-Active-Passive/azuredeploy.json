@@ -127,9 +127,9 @@
     },
     "enableNativeTypes": {
       "type": "bool",
-      "defaultValue": false,
+      "defaultValue": true,
       "metadata": {
-        "description": "Set to true to cast columns to their native types (long, double, boolean, timestamp) on export, using the per-table column map produced by the daily schema-refresh pipeline (_schemas/workspace-schemas.json). Leave false to keep the proven all-string export. The hourly trigger uses the default, so scheduled runs are unaffected until you opt in. When enabling for a table, delete its existing Delta folder first because switching a column from string to a native type is an incompatible Delta schema change. Requires pl_refresh_table_schemas to have produced the schema map."
+        "description": "Cast columns to their native types (long, double, boolean, timestamp) on export, using the per-table column map produced by pl_refresh_table_schemas (_schemas/workspace-schemas.json). Default true. The discovery pipeline refreshes the schema map immediately before each export run, so newly added tables are typed correctly from their first export. Set to false to fall back to the all-string export. Switching an already-exported table between string and native types is an incompatible Delta schema change, so empty its Delta folder when you change this for existing tables. When true, the Data Factory managed identity needs Reader on the Log Analytics workspace."
       }
     },
     "enableTrigger": {
@@ -677,7 +677,7 @@
           },
           "enableNativeTypes": {
             "type": "Bool",
-            "defaultValue": false
+            "defaultValue": true
           },
           "metadataFileSystem": {
             "type": "String",
@@ -872,7 +872,7 @@
       "apiVersion": "2018-06-01",
       "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'pl_discover_and_export_azmon_to_delta')]",
       "properties": {
-        "description": "Discover matching Azure Monitor export containers through Azure Resource Manager and export the previous processing window to Delta tables using the df_json_to_delta data flow.",
+        "description": "Refresh the workspace table schema, then discover matching Azure Monitor export containers through Azure Resource Manager and export the previous processing window to Delta tables. The first activity runs pl_refresh_table_schemas so the per-table column-type map is current before the export; if it fails the export does not run (hard stop). With enableNativeTypes true (default) columns are written as native types, otherwise as strings.",
         "parameters": {
           "sourceStorageAccountResourceId": {
             "type": "String",
@@ -925,9 +925,32 @@
         },
         "activities": [
           {
+            "name": "RefreshSchemas",
+            "type": "ExecutePipeline",
+            "dependsOn": [],
+            "typeProperties": {
+              "pipeline": {
+                "referenceName": "pl_refresh_table_schemas",
+                "type": "PipelineReference"
+              },
+              "waitOnCompletion": true,
+              "parameters": {
+                "sourceWorkspaceResourceId": "@pipeline().parameters.sourceWorkspaceResourceId",
+                "metadataFileSystem": "@pipeline().parameters.metadataFileSystem"
+              }
+            }
+          },
+          {
             "name": "ListSourceContainers",
             "type": "WebActivity",
-            "dependsOn": [],
+            "dependsOn": [
+              {
+                "activity": "RefreshSchemas",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
             "policy": {
               "timeout": "0.00:02:00",
               "retry": 2,
@@ -1012,7 +1035,8 @@
       },
       "dependsOn": [
         "[resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName'))]",
-        "[resourceId('Microsoft.DataFactory/factories/pipelines', parameters('dataFactoryName'), 'pl_export_container_window_delta')]"
+        "[resourceId('Microsoft.DataFactory/factories/pipelines', parameters('dataFactoryName'), 'pl_export_container_window_delta')]",
+        "[resourceId('Microsoft.DataFactory/factories/pipelines', parameters('dataFactoryName'), 'pl_refresh_table_schemas')]"
       ]
     },
     {      "type": "Microsoft.DataFactory/factories/pipelines",
@@ -1161,40 +1185,6 @@
       ]
     },
     {
-      "condition": "[or(parameters('enableTrigger'), not(empty(parameters('triggerStartTimeUtc'))))]",
-      "type": "Microsoft.DataFactory/factories/triggers",
-      "apiVersion": "2018-06-01",
-      "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'tr_daily_refresh_table_schemas')]",
-      "properties": {
-        "annotations": [
-          "sentinel-bcdr",
-          "metadata"
-        ],
-        "pipelines": [
-          {
-            "pipelineReference": {
-              "referenceName": "pl_refresh_table_schemas",
-              "type": "PipelineReference"
-            },
-            "parameters": {}
-          }
-        ],
-        "type": "ScheduleTrigger",
-        "typeProperties": {
-          "recurrence": {
-            "frequency": "Day",
-            "interval": 1,
-            "startTime": "[if(empty(parameters('triggerStartTimeUtc')), '2026-01-01T00:00:00Z', parameters('triggerStartTimeUtc'))]",
-            "timeZone": "UTC"
-          }
-        }
-      },
-      "dependsOn": [
-        "[resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName'))]",
-        "[resourceId('Microsoft.DataFactory/factories/pipelines', parameters('dataFactoryName'), 'pl_refresh_table_schemas')]"
-      ]
-    },
-    {
       "condition": "[not(empty(parameters('logAnalyticsWorkspaceId')))]",
       "type": "Microsoft.Insights/diagnosticSettings",
       "apiVersion": "2021-05-01-preview",
@@ -1247,7 +1237,7 @@
     },
     "workspaceRoleRequired": {
       "type": "string",
-      "value": "Grant Reader to the Data Factory managed identity on the Log Analytics workspace so the daily schema-refresh pipeline can read declared table column types from the Azure Resource Manager Tables API (metadata only). Only needed if you run pl_refresh_table_schemas."
+      "value": "Grant Reader to the Data Factory managed identity on the Log Analytics workspace. The hourly export refreshes the table schema (declared column types from the Azure Resource Manager Tables API, metadata only) before each run, so this role is required whenever enableNativeTypes is true (the default)."
     }
   }
 }

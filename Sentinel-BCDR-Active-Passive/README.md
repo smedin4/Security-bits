@@ -11,10 +11,11 @@ The files generated in target ADLS Gen2 storage account are ready to be consumed
 - Azure Data Factory with a system-assigned managed identity.
 - Source Azure Blob Storage linked service using managed identity authentication.
 - Target ADLS Gen2 linked service.
-- A generic, schema-drift Mapping Data Flow (`df_json_to_delta`) that converts JSON-lines export blobs to a Delta table.
+- A generic, schema-drift Mapping Data Flow (`df_json_to_delta`) that converts JSON-lines export blobs to a Delta table, plus a native-typed variant (`df_json_to_delta_native`).
 - A warm data flow Integration Runtime (`ir-dataflow-warm`) that runs the data flow.
 - A child pipeline that exports a single container and time window to Delta.
-- A master discovery pipeline that lists matching source containers and fans the export out across them.
+- A schema-refresh pipeline (`pl_refresh_table_schemas`) that records the workspace's declared column types for native typing.
+- A master discovery pipeline that refreshes the schema, lists matching source containers, and fans the export out across them.
 - Optional hourly schedule trigger.
 - Optional diagnostic settings to Log Analytics.
 
@@ -55,7 +56,7 @@ The `Storage Blob Data Reader` role is required to read source blobs.
 
 The `Storage Blob Data Contributor` role is required to write Delta output to the target ADLS Gen2 account or file system.
 
-The `Reader` role on the **Log Analytics workspace** is required only if you run the daily schema-refresh pipeline (`pl_refresh_table_schemas`). It lets the managed identity read declared table column types from the Azure Resource Manager Tables API (metadata only — it does not grant access to log data). See [Native column types (schema refresh)](#native-column-types-schema-refresh).
+The `Reader` role on the **Log Analytics workspace** is required because the hourly export refreshes the table schema before each run (`enableNativeTypes` defaults to `true`). It lets the managed identity read declared table column types from the Azure Resource Manager Tables API (metadata only — it does not grant access to log data). It is only optional if you set `enableNativeTypes` to `false`. See [Native column types](#native-column-types).
 
 ```powershell
 $principalId = "<data-factory-principal-id>"
@@ -69,28 +70,30 @@ az role assignment create --assignee-object-id $principalId --assignee-principal
 az role assignment create --assignee-object-id $principalId --assignee-principal-type ServicePrincipal --role Reader --scope $workspaceScope
 ```
 
-## Native column types (schema refresh)
+## Native column types
 
-By default the export reads every column as **string** (`inferDriftedColumnTypes: false`), which is the only deterministic choice for a single generic flow: Azure Monitor JSON is schema-on-read, so the same column can infer as different types across files (Short vs Long, Boolean vs String), and `dynamic` columns hold arbitrary JSON. Reading everything as string guarantees the Delta schema never conflicts. The trade-off is that analysts cast at query time (`toint()`, `tolong()`, `tobool()`, `parse_json()`).
+By default the export casts each column to its **declared native type** (`long`, `double`, `boolean`, `timestamp`), so analysts query without casting. The types come from the workspace's **declared** schema (which is stable), not from per-file inference — Azure Monitor JSON is schema-on-read, so inferring types per file is non-deterministic (Short vs Long, Boolean vs String) and would conflict at the Delta merge. `string`, `guid`, and `dynamic` columns stay string (`dynamic` holds arbitrary JSON — query with `parse_json()`).
 
-To give analysts **native types** without casting, the template includes a schema-refresh path that reads the workspace's **declared** column types (which are stable) and uses them to cast the string columns back. It is built in three stages, all included:
+It works in three stages:
 
-1. **Schema collection.** `pl_refresh_table_schemas` calls the Azure Resource Manager Tables API for the workspace and writes the response to `_raw/workspace-tables.json` in `metadataFileSystem`. `tr_daily_refresh_table_schemas` runs it daily. This needs **Reader on the workspace** (above). Run it once and confirm the file appears before relying on it.
-2. **Bucketing.** In the same pipeline, the `BuildSchemas` data flow (`df_build_schemas`) reads `_raw/workspace-tables.json`, flattens every table's declared columns, and writes a single compact map `_schemas/workspace-schemas.json`. Each line is keyed by the lowercase table name and lists which columns are `long` (`int`/`long`), `double` (`real`), `boolean`, and `timestamp` (`datetime`); everything else — `string`, `guid`, and `dynamic` — stays string.
-3. **Cast-back.** When `enableNativeTypes` is **true**, the export looks up the table's entry in `_schemas/workspace-schemas.json` and runs `df_json_to_delta_native`, which casts those columns from string to their native type before writing Delta. `dynamic` columns remain JSON strings (query with `parse_json()`). When `enableNativeTypes` is **false** (default), the export uses the unchanged all-string `df_json_to_delta`; when a table has no schema entry, its columns stay string. So native typing is fully opt-in and degrades safely.
+1. **Schema collection.** `pl_refresh_table_schemas` calls the Azure Resource Manager Tables API for the workspace and writes the response to `_raw/workspace-tables.json` in `metadataFileSystem`. This needs **Reader on the workspace** (above).
+2. **Bucketing.** In the same pipeline, the `BuildSchemas` data flow (`df_build_schemas`) reads `_raw/workspace-tables.json`, flattens every table's declared columns, and writes a single compact map `_schemas/workspace-schemas.json`. Each line is keyed by the lowercase table name and lists which columns are `long` (`int`/`long`), `double` (`real`), `boolean`, and `timestamp` (`datetime`); everything else stays string.
+3. **Cast-back.** The export looks up the table's entry in `_schemas/workspace-schemas.json` and runs `df_json_to_delta_native`, which casts those columns from string to their native type before writing Delta.
 
-### Turning on native types
+### Schema refresh runs before every export
 
-`enableNativeTypes` defaults to **false**, so the hourly trigger keeps producing the proven all-string output until you opt in. To switch a table (or all tables) to native types:
+`pl_discover_and_export_azmon_to_delta` runs `pl_refresh_table_schemas` as its **first activity** (a hard dependency: if the refresh fails, the export does not run). This closes a race: a source container `am-<table>` only exists after the table is **declared** in the workspace, and the refresh reads the declared schema — so by the time discovery sees a table, the just-run refresh already has its column types. Every table is therefore written with native types from its first export, with no string→native transition (which would otherwise be an incompatible Delta change). There is no separate daily schema trigger; the refresh is part of the hourly run.
 
-1. Run `pl_refresh_table_schemas` at least once so `_schemas/workspace-schemas.json` exists.
-2. **Delete the existing Delta folder(s)** for the tables you are converting. Changing a column from string to a native type is an incompatible Delta schema change, so the old all-string files must be removed first (same reset you did when switching modes).
-3. Run `pl_discover_and_export_azmon_to_delta` (or `pl_export_container_window_delta` for one container) with `enableNativeTypes = true`. Use `tableAllowList` to convert a small set first.
-4. Verify the new columns are typed (for example `signinlogs.DurationMs` is `long`, the `Is*` flags are `boolean`, `TimeGenerated` is `timestamp`). Once happy, set `enableNativeTypes` to true for the scheduled runs.
+> **`enableNativeTypes = false` falls back to all-string.** Setting the parameter to `false` routes the export through the unchanged `df_json_to_delta`, which writes every column as string (analysts cast at query time with `toint()`, `tolong()`, `tobool()`, `parse_json()`). The all-string path is deterministic and needs no workspace access.
 
-> **Validate `df_json_to_delta_native` in Studio first.** The cast step uses data-flow column patterns. Open the data flow in a debug session and confirm a data preview for one table before enabling it broadly. Timestamps are parsed as UTC and truncated to milliseconds (Azure Monitor writes ISO 8601 with 7 fractional digits, beyond the millisecond limit of `toTimestamp`), and JSON booleans parse with `toBoolean()`. Numeric or datetime values that do not parse become null rather than failing the run. Production is unaffected while `enableNativeTypes` stays false.
+### Switching an existing table between string and native
+
+Changing a column from string to a native type (or back) is an incompatible Delta schema change. If you flip `enableNativeTypes` for tables that already have Delta folders, **delete those folders first** so they are recreated with the new types. A clean run against an empty target file system needs no resets.
+
+> **Timestamp and boolean parsing.** Timestamps are parsed as UTC and truncated to milliseconds (Azure Monitor writes ISO 8601 with 7 fractional digits, beyond the millisecond limit of `toTimestamp`); JSON booleans parse with `toBoolean()`. Values that do not parse become null rather than failing the run. To inspect the cast logic, open `df_json_to_delta_native` in a Data Factory Studio debug session.
 
 The declared types do not change between runs, so this produces native types with no schema-merge conflicts — and it stays entirely within Data Factory (no Azure Function or Databricks).
+
 
 
 ## Output Layout
@@ -373,7 +376,7 @@ To run the schedule for only some tables, set `tableAllowList` to a comma-separa
 | `enableTrigger` | No | Set to `true` to create the hourly schedule trigger. Leave `false` to deploy without a schedule and run the pipeline manually (recommended while testing). The trigger is deployed stopped; start it once after deployment. | `false` |
 | `processingDelayHours` | No | Hours to wait before processing. Default processes the previous complete hour. | `1` |
 | `tableAllowList` | No | Comma-separated source container names to process. Leave empty to process all containers matching `sourceContainerPrefix`. Use it to test on a few tables before running everything. | `am-signinlogs,am-microsoftgraphactivitylogs` |
-| `enableNativeTypes` | No | Set to `true` to cast columns to native types (`long`, `double`, `boolean`, `timestamp`) using the schema map from `pl_refresh_table_schemas`. Leave `false` for the all-string export. The hourly trigger uses the default, so opt in deliberately and delete a table's Delta folder before converting it (string→native is an incompatible Delta change). See [Turning on native types](#turning-on-native-types). | `false` |
+| `enableNativeTypes` | No | Cast columns to native types (`long`, `double`, `boolean`, `timestamp`) using the schema map from `pl_refresh_table_schemas`, which the hourly export refreshes before each run. Default `true`. Set `false` for the all-string export (no workspace access needed). Switching an already-exported table between string and native is an incompatible Delta change, so empty its Delta folder when you change this. See [Native column types](#native-column-types). | `true` |
 | `metadataFileSystem` | No | Target ADLS Gen2 file system where the schema-refresh pipeline writes `_raw/workspace-tables.json` and `_schemas/workspace-schemas.json`. Defaults to the same file system as the Delta output. | `sentinel-bcdr` |
 | `dataFlowCoreCount` | No | Spark cores for the warm data flow Integration Runtime. `8` is cheapest; `16` is the recommended production minimum. | `8` |
 | `dataFlowTimeToLiveMinutes` | No | Warm-cluster time-to-live in minutes for the data flow Integration Runtime. Keeps the Spark cluster warm between hourly runs. `0` disables the warm pool. | `10` |

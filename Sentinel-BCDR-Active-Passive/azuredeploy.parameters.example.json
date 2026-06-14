@@ -48,7 +48,7 @@
       "value": ""
     },
     "enableNativeTypes": {
-      "value": false
+      "value": true
     },
     "metadataFileSystem": {
       "value": "sentinel-bcdr"

@@ -88,7 +88,7 @@ To give analysts **native types** without casting, the template includes a schem
 3. Run `pl_discover_and_export_azmon_to_delta` (or `pl_export_container_window_delta` for one container) with `enableNativeTypes = true`. Use `tableAllowList` to convert a small set first.
 4. Verify the new columns are typed (for example `signinlogs.DurationMs` is `long`, the `Is*` flags are `boolean`, `TimeGenerated` is `timestamp`). Once happy, set `enableNativeTypes` to true for the scheduled runs.
 
-> **Validate `df_json_to_delta_native` in Studio first.** The cast step uses data-flow column patterns. Open the data flow in a debug session and confirm a data preview for one table before enabling it broadly. Watch the runtime-only cases: `datetime` strings must parse with `toTimestamp()` (Azure Monitor uses ISO 8601), and JSON booleans must parse with `toBoolean()`. Production is unaffected while `enableNativeTypes` stays false.
+> **Validate `df_json_to_delta_native` in Studio first.** The cast step uses data-flow column patterns. Open the data flow in a debug session and confirm a data preview for one table before enabling it broadly. Timestamps are parsed as UTC and truncated to milliseconds (Azure Monitor writes ISO 8601 with 7 fractional digits, beyond the millisecond limit of `toTimestamp`), and JSON booleans parse with `toBoolean()`. Numeric or datetime values that do not parse become null rather than failing the run. Production is unaffected while `enableNativeTypes` stays false.
 
 The declared types do not change between runs, so this produces native types with no schema-merge conflicts — and it stays entirely within Data Factory (no Azure Function or Databricks).
 

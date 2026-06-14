@@ -408,6 +408,94 @@
       ]
     },
     {
+      "type": "Microsoft.DataFactory/factories/dataflows",
+      "apiVersion": "2018-06-01",
+      "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'df_build_schemas')]",
+      "properties": {
+        "type": "MappingDataFlow",
+        "description": "Read the raw Log Analytics Tables API dump (_raw/workspace-tables.json) and emit a compact per-table column-type map (_schemas/workspace-schemas.json) used by the export to cast string columns back to native types. Isolated from the export path: only pl_refresh_table_schemas references it. Validate in a Data Factory Studio debug session (confirm the single-file JSON sink option and data preview) before relying on the output.",
+        "annotations": [
+          "sentinel-bcdr",
+          "metadata"
+        ],
+        "typeProperties": {
+          "sources": [
+            {
+              "name": "RawSchemas",
+              "linkedService": {
+                "referenceName": "ls_target_bcdr_adlsgen2",
+                "type": "LinkedServiceReference"
+              }
+            }
+          ],
+          "sinks": [
+            {
+              "name": "SchemasSink",
+              "linkedService": {
+                "referenceName": "ls_target_bcdr_adlsgen2",
+                "type": "LinkedServiceReference"
+              }
+            }
+          ],
+          "transformations": [
+            {
+              "name": "FlattenCols"
+            },
+            {
+              "name": "Bucket"
+            },
+            {
+              "name": "Bucketed"
+            }
+          ],
+          "scriptLines": [
+            "parameters{",
+            "\tmetadataFileSystem as string",
+            "}",
+            "source(output(",
+            "\t\tvalue as (properties as (schema as (name as string, standardColumns as (name as string, type as string)[])))[]",
+            "\t),",
+            "\tallowSchemaDrift: true,",
+            "\tvalidateSchema: false,",
+            "\tignoreNoFilesFound: false,",
+            "\tformat: 'json',",
+            "\tfileSystem: ($metadataFileSystem),",
+            "\tfolderPath: '_raw',",
+            "\tfileName: 'workspace-tables.json',",
+            "\tdocumentForm: 'singleDocument') ~> RawSchemas",
+            "RawSchemas foldDown(unroll(value.properties.schema.standardColumns, value),",
+            "\tmapColumn(",
+            "\t\ttableName = value.properties.schema.name,",
+            "\t\tcolName = value.properties.schema.standardColumns.name,",
+            "\t\tlaType = value.properties.schema.standardColumns.type",
+            "\t),",
+            "\tskipDuplicateMapInputs: true,",
+            "\tskipDuplicateMapOutputs: true) ~> FlattenCols",
+            "FlattenCols derive(tableKey = lower(tableName),",
+            "\t\tbkt = case(laType == 'int' || laType == 'long', 'long', laType == 'real', 'double', laType == 'boolean', 'boolean', laType == 'datetime', 'timestamp', 'string')) ~> Bucket",
+            "Bucket aggregate(groupBy(tableKey),",
+            "\tlongCols = collect(case(bkt == 'long', colName)),",
+            "\tdoubleCols = collect(case(bkt == 'double', colName)),",
+            "\tboolCols = collect(case(bkt == 'boolean', colName)),",
+            "\ttsCols = collect(case(bkt == 'timestamp', colName))) ~> Bucketed",
+            "Bucketed sink(allowSchemaDrift: true,",
+            "\tvalidateSchema: false,",
+            "\tformat: 'json',",
+            "\tfileSystem: ($metadataFileSystem),",
+            "\tfolderPath: '_schemas',",
+            "\tpartitionFileNames: ['workspace-schemas.json'],",
+            "\tskipDuplicateMapInputs: true,",
+            "\tskipDuplicateMapOutputs: true,",
+            "\tpartitionBy('roundRobin', 1)) ~> SchemasSink"
+          ]
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName'))]",
+        "[resourceId('Microsoft.DataFactory/factories/linkedservices', parameters('dataFactoryName'), 'ls_target_bcdr_adlsgen2')]"
+      ]
+    },
+    {
       "type": "Microsoft.DataFactory/factories/pipelines",
       "apiVersion": "2018-06-01",
       "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'pl_export_container_window_delta')]",
@@ -693,6 +781,39 @@
                 }
               }
             ]
+          },
+          {
+            "name": "BuildSchemas",
+            "type": "ExecuteDataFlow",
+            "dependsOn": [
+              {
+                "activity": "CopyWorkspaceTablesSchema",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "policy": {
+              "timeout": "0.00:30:00",
+              "retry": 0,
+              "retryIntervalInSeconds": 30,
+              "secureOutput": false,
+              "secureInput": false
+            },
+            "typeProperties": {
+              "dataflow": {
+                "referenceName": "df_build_schemas",
+                "type": "DataFlowReference",
+                "parameters": {
+                  "metadataFileSystem": "'@{pipeline().parameters.metadataFileSystem}'"
+                }
+              },
+              "integrationRuntime": {
+                "referenceName": "ir-dataflow-warm",
+                "type": "IntegrationRuntimeReference"
+              },
+              "traceLevel": "None"
+            }
           }
         ],
         "annotations": [
@@ -703,7 +824,9 @@
       "dependsOn": [
         "[resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName'))]",
         "[resourceId('Microsoft.DataFactory/factories/datasets', parameters('dataFactoryName'), 'ds_arm_workspace_tables')]",
-        "[resourceId('Microsoft.DataFactory/factories/datasets', parameters('dataFactoryName'), 'ds_metadata_raw_json')]"
+        "[resourceId('Microsoft.DataFactory/factories/datasets', parameters('dataFactoryName'), 'ds_metadata_raw_json')]",
+        "[resourceId('Microsoft.DataFactory/factories/dataflows', parameters('dataFactoryName'), 'df_build_schemas')]",
+        "[resourceId('Microsoft.DataFactory/factories/integrationRuntimes', parameters('dataFactoryName'), 'ir-dataflow-warm')]"
       ]
     },
     {      "condition": "[or(parameters('enableTrigger'), not(empty(parameters('triggerStartTimeUtc'))))]",

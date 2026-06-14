@@ -595,7 +595,7 @@
             "source(output(",
             "\t\tvalue as (properties as (schema as (name as string, standardColumns as (name as string, type as string)[])))[]",
             "\t),",
-            "\tallowSchemaDrift: true,",
+            "\tallowSchemaDrift: false,",
             "\tvalidateSchema: false,",
             "\tignoreNoFilesFound: false,",
             "\tformat: 'json',",

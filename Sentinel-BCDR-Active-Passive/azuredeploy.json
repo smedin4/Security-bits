@@ -301,7 +301,8 @@
             "fileName": "@dataset().fileName",
             "fileSystem": "@dataset().fileSystem",
             "folderPath": "_raw"
-          }
+          },
+          "encodingName": "UTF-8 without BOM"
         },
         "schema": {}
       },

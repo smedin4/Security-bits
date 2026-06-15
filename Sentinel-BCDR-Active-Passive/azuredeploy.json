@@ -383,7 +383,7 @@
       "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'df_json_to_delta')]",
       "properties": {
         "type": "MappingDataFlow",
-        "description": "Generic JSON-lines to Delta conversion with schema drift. Validate in a Data Factory Studio debug session before relying on it in production.",
+        "description": "Generic JSON-lines to Delta conversion with schema drift. Complex columns (JSON objects/arrays from Log Analytics dynamic columns) are serialized to string so the Delta schema stays stable across hours; every column is written as string. Validate in a Data Factory Studio debug session before relying on it in production.",
         "annotations": [
           "sentinel-bcdr",
           "delta"
@@ -409,6 +409,9 @@
           ],
           "transformations": [
             {
+              "name": "StringifyComplex"
+            },
+            {
               "name": "AddMeta"
             }
           ],
@@ -428,7 +431,8 @@
             "\tcontainer: ($containerName),",
             "\twildcardPaths: [(concat($sourceFolderPath, '/**/', $sourceFilePattern))],",
             "\tdocumentForm: 'documentPerLine') ~> SourceJson",
-            "SourceJson derive(IngestedUtc = currentUTC()) ~> AddMeta",
+            "SourceJson derive(each(match(type == 'complex' || type == 'array' || type == 'map'), $$ = toString($$))) ~> StringifyComplex",
+            "StringifyComplex derive(IngestedUtc = currentUTC()) ~> AddMeta",
             "AddMeta sink(allowSchemaDrift: true,",
             "\tvalidateSchema: false,",
             "\tformat: 'delta',",
@@ -458,7 +462,7 @@
       "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'df_json_to_delta_native')]",
       "properties": {
         "type": "MappingDataFlow",
-        "description": "Native-typed variant of df_json_to_delta. Casts the columns named in the longColsCsv/doubleColsCsv/boolColsCsv/tsColsCsv parameters from string to long/double/boolean/timestamp before writing Delta; all other columns stay string. Timestamps are parsed as UTC and truncated to millisecond precision (Azure Monitor writes ISO 8601 with 7 fractional digits, which exceeds the millisecond limit of toTimestamp). When every CSV is empty the output is identical to the all-string df_json_to_delta. Only invoked when enableNativeTypes is true. Validate in a Data Factory Studio debug session before relying on it in production.",
+        "description": "Native-typed variant of df_json_to_delta. Complex columns (JSON objects/arrays from Log Analytics dynamic columns) are first serialized to string so the Delta schema stays stable across hours. Then casts the columns named in the longColsCsv/doubleColsCsv/boolColsCsv/tsColsCsv parameters from string to long/double/boolean/timestamp before writing Delta; all other columns stay string. Timestamps are parsed as UTC and truncated to millisecond precision (Azure Monitor writes ISO 8601 with 7 fractional digits, which exceeds the millisecond limit of toTimestamp). When every CSV is empty and there are no complex columns the output is identical to the all-string df_json_to_delta. Only invoked when enableNativeTypes is true. Validate in a Data Factory Studio debug session before relying on it in production.",
         "annotations": [
           "sentinel-bcdr",
           "delta"
@@ -483,6 +487,9 @@
             }
           ],
           "transformations": [
+            {
+              "name": "StringifyComplex"
+            },
             {
               "name": "CastLong"
             },
@@ -519,7 +526,8 @@
             "\tcontainer: ($containerName),",
             "\twildcardPaths: [(concat($sourceFolderPath, '/**/', $sourceFilePattern))],",
             "\tdocumentForm: 'documentPerLine') ~> SourceJson",
-            "SourceJson derive(each(match(instr(',' + $longColsCsv + ',', ',' + name + ',') > 0), $$ = toLong($$))) ~> CastLong",
+            "SourceJson derive(each(match(type == 'complex' || type == 'array' || type == 'map'), $$ = toString($$))) ~> StringifyComplex",
+            "StringifyComplex derive(each(match(instr(',' + $longColsCsv + ',', ',' + name + ',') > 0), $$ = toLong($$))) ~> CastLong",
             "CastLong derive(each(match(instr(',' + $doubleColsCsv + ',', ',' + name + ',') > 0), $$ = toDouble($$))) ~> CastDouble",
             "CastDouble derive(each(match(instr(',' + $boolColsCsv + ',', ',' + name + ',') > 0), $$ = toBoolean($$))) ~> CastBool",
             "CastBool derive(each(match(instr(',' + $tsColsCsv + ',', ',' + name + ',') > 0), $$ = coalesce(toTimestamp(replace(left($$, 23), 'T', ' '), 'yyyy-MM-dd HH:mm:ss.SSS', 'UTC'), toTimestamp(replace(left($$, 19), 'T', ' '), 'yyyy-MM-dd HH:mm:ss', 'UTC')))) ~> CastTs",

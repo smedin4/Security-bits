@@ -1,5 +1,8 @@
 # Incident-Confirm-Activity-By-Email
 
+> [!NOTE]
+> Personal project — **not affiliated with, endorsed by, or supported by Microsoft**, and not an official Microsoft product. Provided **"AS IS", without warranty of any kind**; review and test before use, and use at your own risk.
+
 ## Overview
 
 This Azure Logic App playbook for Microsoft Sentinel SOAR sends an email to users involved in a security incident, asking them to confirm whether suspicious activity (such as traveling to multiple countries) was performed by them.

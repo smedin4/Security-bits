@@ -51,7 +51,7 @@
       "type": "string",
       "defaultValue": "sentinel-bcdr",
       "metadata": {
-        "description": "ADLS Gen2 file system on the target account where pipeline metadata is written. The daily schema-refresh pipeline writes the workspace table schema under a _raw/ folder here. Defaults to the same file system as the Delta output; set a separate file system (for example sentinel-bcdr-metadata) to keep metadata out of the federation file system. The file system must already exist."
+        "description": "ADLS Gen2 file system on the target account where pipeline metadata is written. The schema-refresh pipeline writes the workspace table schema under a _raw/ folder here before each export. Defaults to the same file system as the Delta output; set a separate file system (for example sentinel-bcdr-metadata) to keep metadata out of the federation file system. The file system must already exist."
       }
     },
     "sourceContainerPrefix": {

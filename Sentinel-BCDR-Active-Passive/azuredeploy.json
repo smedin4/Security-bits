@@ -462,7 +462,7 @@
       "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'df_json_to_delta_native')]",
       "properties": {
         "type": "MappingDataFlow",
-        "description": "Native-typed variant of df_json_to_delta. Complex columns (JSON objects/arrays from Log Analytics dynamic columns) are first serialized to string so the Delta schema stays stable across hours. Then casts the columns named in the longColsCsv/doubleColsCsv/boolColsCsv/tsColsCsv parameters from string to long/double/boolean/timestamp before writing Delta; all other columns stay string. Timestamps are parsed as UTC and truncated to millisecond precision (Azure Monitor writes ISO 8601 with 7 fractional digits, which exceeds the millisecond limit of toTimestamp). When every CSV is empty and there are no complex columns the output is identical to the all-string df_json_to_delta. Only invoked when enableNativeTypes is true. Validate in a Data Factory Studio debug session before relying on it in production.",
+        "description": "Native-typed variant of df_json_to_delta. The workspace schema map supplies the declared dynamic columns, which are serialized to string first so the Delta schema stays stable across hours. Then the columns named in longColsCsv/doubleColsCsv/boolColsCsv/tsColsCsv are cast from string to long/double/boolean/timestamp before writing Delta; all other columns stay string. Timestamps are parsed as UTC and truncated to millisecond precision (Azure Monitor writes ISO 8601 with 7 fractional digits, which exceeds the millisecond limit of toTimestamp). When every CSV is empty and there are no dynamic columns the output is identical to the all-string df_json_to_delta. Only invoked when enableNativeTypes is true. Validate in a Data Factory Studio debug session before relying on it in production.",
         "annotations": [
           "sentinel-bcdr",
           "delta"
@@ -488,7 +488,7 @@
           ],
           "transformations": [
             {
-              "name": "StringifyComplex"
+              "name": "StringifyDynamic"
             },
             {
               "name": "CastLong"
@@ -513,6 +513,7 @@
             "\tsourceFilePattern as string,",
             "\ttargetFileSystem as string,",
             "\ttargetFolder as string,",
+            "\tdynamicColsCsv as string,",
             "\tlongColsCsv as string,",
             "\tdoubleColsCsv as string,",
             "\tboolColsCsv as string,",
@@ -526,8 +527,8 @@
             "\tcontainer: ($containerName),",
             "\twildcardPaths: [(concat($sourceFolderPath, '/**/', $sourceFilePattern))],",
             "\tdocumentForm: 'documentPerLine') ~> SourceJson",
-            "SourceJson derive(each(match(type == 'complex' || type == 'array' || type == 'map'), $$ = toString($$))) ~> StringifyComplex",
-            "StringifyComplex derive(each(match(instr(',' + $longColsCsv + ',', ',' + name + ',') > 0), $$ = toLong($$))) ~> CastLong",
+            "SourceJson derive(each(match(instr(',' + $dynamicColsCsv + ',', ',' + name + ',') > 0), $$ = toString($$))) ~> StringifyDynamic",
+            "StringifyDynamic derive(each(match(instr(',' + $longColsCsv + ',', ',' + name + ',') > 0), $$ = toLong($$))) ~> CastLong",
             "CastLong derive(each(match(instr(',' + $doubleColsCsv + ',', ',' + name + ',') > 0), $$ = toDouble($$))) ~> CastDouble",
             "CastDouble derive(each(match(instr(',' + $boolColsCsv + ',', ',' + name + ',') > 0), $$ = toBoolean($$))) ~> CastBool",
             "CastBool derive(each(match(instr(',' + $tsColsCsv + ',', ',' + name + ',') > 0), $$ = coalesce(toTimestamp(replace(left($$, 23), 'T', ' '), 'yyyy-MM-dd HH:mm:ss.SSS', 'UTC'), toTimestamp(replace(left($$, 19), 'T', ' '), 'yyyy-MM-dd HH:mm:ss', 'UTC')))) ~> CastTs",
@@ -561,7 +562,7 @@
       "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'df_build_schemas')]",
       "properties": {
         "type": "MappingDataFlow",
-        "description": "Read the raw Log Analytics Tables API dump (_raw/workspace-tables.json) and emit a compact per-table column-type map (_schemas/workspace-schemas.json) used by the export to cast string columns back to native types. Isolated from the export path: only pl_refresh_table_schemas references it. Validate in a Data Factory Studio debug session (confirm the single-file JSON sink option and data preview) before relying on the output.",
+        "description": "Read the raw Log Analytics Tables API dump (_raw/workspace-tables.json) and emit a compact per-table column-type map (_schemas/workspace-schemas.json) used by the export to cast string columns back to native types and stringify declared dynamic columns. Isolated from the export path: only pl_refresh_table_schemas references it. Validate in a Data Factory Studio debug session (confirm the single-file JSON sink option and data preview) before relying on the output.",
         "annotations": [
           "sentinel-bcdr",
           "metadata"
@@ -625,7 +626,8 @@
             "\tlongCols = collect(case(bkt == 'long', colName)),",
             "\tdoubleCols = collect(case(bkt == 'double', colName)),",
             "\tboolCols = collect(case(bkt == 'boolean', colName)),",
-            "\ttsCols = collect(case(bkt == 'timestamp', colName))) ~> Bucketed",
+            "\ttsCols = collect(case(bkt == 'timestamp', colName)),",
+            "\tdynamicCols = collect(case(laType == 'dynamic', colName))) ~> Bucketed",
             "Bucketed sink(allowSchemaDrift: true,",
             "\tvalidateSchema: false,",
             "\tformat: 'json',",
@@ -845,6 +847,7 @@
                         "sourceFilePattern": "'@{pipeline().parameters.sourceFilePattern}'",
                         "targetFileSystem": "'@{pipeline().parameters.targetFileSystem}'",
                         "targetFolder": "'@{variables('targetFolder')}'",
+                        "dynamicColsCsv": "'@{if(empty(activity('FilterSchema').output.value), '', join(activity('FilterSchema').output.value[0].dynamicCols, ','))}'",
                         "longColsCsv": "'@{if(empty(activity('FilterSchema').output.value), '', join(activity('FilterSchema').output.value[0].longCols, ','))}'",
                         "doubleColsCsv": "'@{if(empty(activity('FilterSchema').output.value), '', join(activity('FilterSchema').output.value[0].doubleCols, ','))}'",
                         "boolColsCsv": "'@{if(empty(activity('FilterSchema').output.value), '', join(activity('FilterSchema').output.value[0].boolCols, ','))}'",

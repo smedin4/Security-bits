@@ -171,7 +171,7 @@ To run the export every hour, permanently:
 
 Each run processes the previous complete hour: at run time *T* it reads the window *[T − 2h, T − 1h)* (with `processingDelayHours: 1`), which gives Azure Monitor time to finish exporting that hour. Scheduled runs pass `sourceWorkspaceResourceId` automatically, so source listing stays fast — unlike a manual run, where you must type it (see [Supplying parameters for manual runs](#supplying-parameters-for-manual-runs)).
 
-The discovery pipeline fans out with a `ForEach` `batchCount` of 4, because each export runs a Spark data flow on the warm Integration Runtime and a high concurrency would start many Spark clusters at once. Adjust it in the `pl_discover_and_export_azmon_to_delta` pipeline definition to trade compute cost against how quickly the hourly run completes.
+The discovery pipeline fans out with a `ForEach` `batchCount` set by the `exportBatchCount` parameter (default 4), because each export runs a Spark data flow on the warm Integration Runtime and a high concurrency would start many Spark clusters at once. Raise `exportBatchCount` (maximum 50) to finish the hourly run faster at higher compute cost, or lower it to save cost; change the parameter and redeploy.
 
 ### Limiting the scheduled run to specific tables
 
@@ -207,6 +207,7 @@ To run the schedule for only some tables, set `tableAllowList` to a comma-separa
 | `metadataFileSystem` | No | Target ADLS Gen2 file system where the schema-refresh pipeline writes `_raw/workspace-tables.json` and `_schemas/workspace-schemas.json`. Defaults to the same file system as the Delta output. | `sentinel-bcdr` |
 | `dataFlowCoreCount` | No | Spark cores for the warm data flow Integration Runtime. `8` is cheapest; `16` is the recommended production minimum. | `8` |
 | `dataFlowTimeToLiveMinutes` | No | Warm-cluster time-to-live in minutes for the data flow Integration Runtime. Keeps the Spark cluster warm between hourly runs. `0` disables the warm pool. | `10` |
+| `exportBatchCount` | No | Number of tables exported in parallel each run (the discovery pipeline's `ForEach` `batchCount`). Higher finishes faster but starts more concurrent Spark clusters (higher Data Flow compute cost); lower costs less but takes longer. Applied at deployment. Maximum `50`. | `4` |
 | `logAnalyticsWorkspaceId` | No | Optional Log Analytics workspace resource ID for Data Factory diagnostics. Leave empty to disable diagnostics. | `/subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.OperationalInsights/workspaces/<workspace-name>` |
 | `tags` | No | Tags applied to the Data Factory. | `{ "workload": "sentinel-bcdr" }` |
 
@@ -253,7 +254,7 @@ The layout is flat: the data files sit at the table root with no date-partition 
 
 ### Parallelism
 
-The master pipeline discovers all matching `am-*` containers and exports them in parallel. The degree of parallelism is set by the `ForEach` activity's `batchCount` (4 in this template), which is the upper bound; the actual number of concurrent exports is the smaller of `batchCount` and the number of matching containers. It is kept low because each export runs a Spark data flow on the warm Integration Runtime, and a high concurrency would start many Spark clusters at once. Adjust `batchCount` in the `pl_discover_and_export_azmon_to_delta` pipeline definition to trade compute cost against how quickly the hourly run completes.
+The master pipeline discovers all matching `am-*` containers and exports them in parallel. The degree of parallelism is set by the `exportBatchCount` deployment parameter (default `4`), which becomes the `ForEach` activity's `batchCount` — the upper bound; the actual number of concurrent exports is the smaller of `exportBatchCount` and the number of matching containers. It is kept moderate because each export runs a Spark data flow on the warm Integration Runtime, and a high concurrency would start many Spark clusters at once. Raise `exportBatchCount` (maximum 50) to finish the hourly run faster at higher compute cost, or lower it to save cost; change the parameter and redeploy.
 
 ### Source and output formats
 

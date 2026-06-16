@@ -163,6 +163,15 @@
         "description": "Warm-cluster time-to-live in minutes for the data flow Integration Runtime. A short TTL keeps the Spark cluster warm between hourly runs so they skip the multi-minute cold start. 0 disables the warm pool (cold start every run)."
       }
     },
+    "exportBatchCount": {
+      "type": "int",
+      "defaultValue": 4,
+      "minValue": 1,
+      "maxValue": 50,
+      "metadata": {
+        "description": "Number of source containers (tables) the discovery pipeline exports in parallel each run, applied as the ForEach batchCount in pl_discover_and_export_azmon_to_delta. Each parallel export runs its own Spark data flow on the warm Integration Runtime, so raising this (for example to 8) finishes the hourly run faster but starts more concurrent Spark clusters, which increases Data Flow (vCore) compute cost; lowering it costs less but takes longer. Orchestration cost is roughly unchanged. Applied at deployment time, so change it here and redeploy. Maximum 50."
+      }
+    },
     "logAnalyticsWorkspaceId": {
       "type": "string",
       "defaultValue": "",
@@ -650,7 +659,7 @@
       "apiVersion": "2018-06-01",
       "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'pl_export_container_window_delta')]",
       "properties": {
-        "description": "Export one Azure Monitor container/window to a Delta table. When enableNativeTypes is false (default) it uses the all-string df_json_to_delta data flow. When true it looks up the table's column-type map in _schemas/workspace-schemas.json and uses df_json_to_delta_native to cast the listed columns to native types. Validate in Studio before scheduling.",
+        "description": "Export one Azure Monitor container/window to a Delta table. When enableNativeTypes is true (default) it looks up the table's column-type map in _schemas/workspace-schemas.json and uses df_json_to_delta_native to cast the listed columns to native types and stringify dynamic columns. When false it uses the all-string df_json_to_delta data flow. Validate in Studio before scheduling.",
         "parameters": {
           "containerName": {
             "type": "String"
@@ -1008,7 +1017,7 @@
             "typeProperties": {
               "items": "@activity('FilterMatchingContainers').output.value",
               "isSequential": false,
-              "batchCount": 4,
+              "batchCount": "[parameters('exportBatchCount')]",
               "activities": [
                 {
                   "name": "ExportContainerWindowDelta",
@@ -1054,7 +1063,7 @@
       "apiVersion": "2018-06-01",
       "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'pl_refresh_table_schemas')]",
       "properties": {
-        "description": "Read the Log Analytics workspace table schema (declared column types, including dynamic) from the Azure Resource Manager Tables API and write it to the target so the export can later cast string columns back to their native types. Run daily; the export pipeline does not depend on it. Requires Reader on the workspace for the Data Factory managed identity.",
+        "description": "Read the Log Analytics workspace table schema (declared column types, including dynamic) from the Azure Resource Manager Tables API and write the per-table column map to the target so the export can cast string columns back to their native types and stringify dynamic columns. Runs as the first activity of pl_discover_and_export_azmon_to_delta before each export (hard dependency: if it fails, the export does not run). Requires Reader on the workspace for the Data Factory managed identity.",
         "parameters": {
           "sourceWorkspaceResourceId": {
             "type": "String",

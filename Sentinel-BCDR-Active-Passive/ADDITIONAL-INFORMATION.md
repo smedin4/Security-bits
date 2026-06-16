@@ -20,19 +20,19 @@ Estimated monthly cost using public pay-as-you-go USD rates. **These are plannin
 | **Cross-region egress UAE North → Southeast Asia** | $0.08 / GB | **~$6,400** |
 | Southeast Asia ADLS Gen2 (Hot, grows with retention) | ~$0.02 / GB-month | ~$120+ |
 | ADLS Gen2 transactions | ~$0.07 / 10k writes | ~$75 |
-| Data Factory orchestration (activity runs) | $1 / 1,000 runs | ~$75 |
-| **Data Flow compute** (warm 8-vCore IR, hourly) | $0.274 / vCore-hour | **~$3,000–3,500** |
-| **Estimated total (month 1)** | | **~$18,000–18,400** |
+| Data Factory orchestration (activity runs) | $1 / 1,000 runs | ~$75–160 |
+| **Data Flow compute** (warm 8-vCore IR, hourly) | $0.274 / vCore-hour | **~$2,100–3,500** |
+| **Estimated total (month 1)** | | **~$17,000–18,400** |
 
 ### What the Data Flow compute actually costs
 
-In the deployed factory's resource group, the **Azure Data Factory v2 vCore** meter billed about **$102.66/day** (≈$3,080/month), with orchestration at ~$2.48/day and every other ADF meter under $0.01/day. That matches the design:
+In the deployed lab factory's resource group, the **Azure Data Factory v2 vCore** meter has billed between roughly **$71/day and $103/day** across test days (June 15: $71.45/day vCore + $5.33/day orchestration; June 13: $102.66/day vCore + $2.48/day orchestration), with every other ADF meter under $0.01/day — about **$2,100–3,100/month** for compute in the lab. The spread tracks how much data each run processes and how much manual testing ran that day. The design explains the floor:
 
-- The hourly master pipeline fans out with `ForEach` `batchCount: 4`, so up to **four 8-vCore Spark clusters** run concurrently each hour.
+- The hourly master pipeline fans out with `ForEach` `batchCount` (the `exportBatchCount` parameter, default 4), so up to **four 8-vCore Spark clusters** run concurrently each hour.
 - The warm Integration Runtime TTL is **10 minutes**, but hourly runs are **60 minutes apart**, so in steady state **every run cold-starts** a fresh cluster (the warm pool only helps when runs are closer together than the TTL). Each run pays ~3–5 min of startup plus execution.
-- Roughly: 24 runs/day × ~15 vCore-hours/run ≈ 370 vCore-hours/day × $0.274 ≈ **$100/day ≈ $3,000/month**.
+- Roughly: 24 runs/day × ~10–15 vCore-hours/run ≈ 250–370 vCore-hours/day × $0.274 ≈ **$70–100/day**.
 
-> **The Data Flow compute is now the second-largest cost after cross-region egress** — about double the earlier estimate. The earlier $1,100–1,700 figure assumed the warm pool absorbed startup, which does not happen at an hourly cadence with a 10-minute TTL.
+> **The Data Flow compute is the second-largest cost after cross-region egress** — well above the original $1,100–1,700 estimate, which assumed the warm pool absorbed startup. At an hourly cadence with a 10-minute TTL it does not. The lab runs below the 2 TB/day production assumption, so production compute trends toward the upper end (more data per run) — treat the lab range as the overhead floor.
 
 > **Refreshing the schema before every export adds a small increment.** The schema refresh now runs before each hourly export (previously daily) so newly added tables are typed correctly from their first export. That is one extra short Data Flow per hour with its own cold start — roughly **$10–15/day (~$300–450/month)**.
 
@@ -42,7 +42,7 @@ In the deployed factory's resource group, the **Azure Data Factory v2 vCore** me
 
 - **Cross-region egress (~$6,400) dominates the new spend and is unavoidable** for a cross-region BCDR copy — it is the same regardless of which Delta approach is used.
 - **Run less often.** Data Flow compute scales almost linearly with run frequency: every 2 hours roughly halves it, every 3 hours roughly thirds it — at the cost of fresher data. Change `triggerInterval` (and `processingDelayHours` if needed).
-- **Lower `batchCount`.** Fewer concurrent clusters cost less per hour but make each hourly run take longer. Adjust it in the `pl_discover_and_export_azmon_to_delta` pipeline definition.
+- **Tune `exportBatchCount`.** This sets how many tables export in parallel (the `ForEach` `batchCount`, default 4). Raising it (for example to 8) finishes the hourly run faster but starts more concurrent Spark clusters, which **increases** Data Flow (vCore) compute cost; lowering it costs less but takes longer. Orchestration cost is roughly unchanged. Change the `exportBatchCount` deployment parameter and redeploy.
 - **Match the TTL to the cadence, or accept cold starts.** A 10-minute `dataFlowTimeToLiveMinutes` gives no benefit at hourly spacing. Either shorten the interval below the TTL so clusters are reused, or leave it — the cold start is unavoidable at hourly cadence.
 - **Use `tableAllowList` while testing** so the largest tables and their transfer are excluded until you are ready.
 - **Tier the target.** Move long-term Southeast Asia data to **Cool/Archive** tiers (50–80% cheaper storage).

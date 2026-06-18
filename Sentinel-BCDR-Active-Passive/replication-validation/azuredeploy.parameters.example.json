@@ -1,0 +1,27 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "sentinelWorkspaceName": {
+      "value": "bemorene"
+    },
+    "location": {
+      "value": "southeastasia"
+    },
+    "socEmailAddress": {
+      "value": "soc-team@contoso.com"
+    },
+    "resultTableName": {
+      "value": "ReplicationValidation_CL"
+    },
+    "playbookName": {
+      "value": "pb-bcdr-replication-mismatch-email"
+    },
+    "office365ConnectionName": {
+      "value": "office365-bcdr-validation"
+    },
+    "sentinelConnectionName": {
+      "value": "azuresentinel-bcdr-validation"
+    }
+  }
+}

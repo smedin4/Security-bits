@@ -1,0 +1,270 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "comments": "Deploys the Microsoft Sentinel scheduled analytic rule, automation rule, and the SOC email playbook (Logic App) that together alert on BCDR replication mismatches produced by validation-notebook.ipynb."
+  },
+  "parameters": {
+    "sentinelWorkspaceName": {
+      "type": "string",
+      "metadata": {
+        "description": "Name of the Log Analytics workspace that is enabled for Microsoft Sentinel and holds the ReplicationValidation_CL table."
+      }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]",
+      "metadata": {
+        "description": "Location for the playbook (Logic App) and API connections."
+      }
+    },
+    "socEmailAddress": {
+      "type": "string",
+      "metadata": {
+        "description": "Recipient for mismatch alerts, for example soc-team@contoso.com. Use a distribution list."
+      }
+    },
+    "resultTableName": {
+      "type": "string",
+      "defaultValue": "ReplicationValidation_CL",
+      "metadata": {
+        "description": "Analytics-tier table the notebook writes to. This is the name as it appears in Logs (the notebook writes ReplicationValidation_SPRK_CL which surfaces as ReplicationValidation_CL)."
+      }
+    },
+    "playbookName": {
+      "type": "string",
+      "defaultValue": "pb-bcdr-replication-mismatch-email",
+      "metadata": {
+        "description": "Name of the Logic App playbook that emails the SOC team."
+      }
+    },
+    "office365ConnectionName": {
+      "type": "string",
+      "defaultValue": "office365-bcdr-validation",
+      "metadata": {
+        "description": "Name of the Office 365 Outlook API connection used to send the email."
+      }
+    },
+    "sentinelConnectionName": {
+      "type": "string",
+      "defaultValue": "azuresentinel-bcdr-validation",
+      "metadata": {
+        "description": "Name of the Microsoft Sentinel API connection used by the incident trigger."
+      }
+    }
+  },
+  "variables": {
+    "analyticRuleId": "[guid(resourceGroup().id, 'bcdr-replication-validation-rule')]",
+    "automationRuleId": "[guid(resourceGroup().id, 'bcdr-replication-validation-automation')]",
+    "office365ConnectionId": "[resourceId('Microsoft.Web/connections', parameters('office365ConnectionName'))]",
+    "sentinelConnectionId": "[resourceId('Microsoft.Web/connections', parameters('sentinelConnectionName'))]",
+    "playbookResourceId": "[resourceId('Microsoft.Logic/workflows', parameters('playbookName'))]",
+    "office365ApiId": "[subscriptionResourceId('Microsoft.Web/locations/managedApis', parameters('location'), 'office365')]",
+    "sentinelApiId": "[subscriptionResourceId('Microsoft.Web/locations/managedApis', parameters('location'), 'azuresentinel')]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Web/connections",
+      "apiVersion": "2016-06-01",
+      "name": "[parameters('office365ConnectionName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "[parameters('office365ConnectionName')]",
+        "api": {
+          "id": "[variables('office365ApiId')]"
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Web/connections",
+      "apiVersion": "2016-06-01",
+      "name": "[parameters('sentinelConnectionName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "[parameters('sentinelConnectionName')]",
+        "api": {
+          "id": "[variables('sentinelApiId')]"
+        },
+        "parameterValueType": "Alternative"
+      }
+    },
+    {
+      "type": "Microsoft.Logic/workflows",
+      "apiVersion": "2019-05-01",
+      "name": "[parameters('playbookName')]",
+      "location": "[parameters('location')]",
+      "identity": {
+        "type": "SystemAssigned"
+      },
+      "dependsOn": [
+        "[variables('office365ConnectionId')]",
+        "[variables('sentinelConnectionId')]"
+      ],
+      "properties": {
+        "state": "Enabled",
+        "definition": {
+          "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+          "contentVersion": "1.0.0.0",
+          "parameters": {
+            "$connections": {
+              "defaultValue": {},
+              "type": "Object"
+            },
+            "socEmailAddress": {
+              "defaultValue": "[parameters('socEmailAddress')]",
+              "type": "String"
+            }
+          },
+          "triggers": {
+            "Microsoft_Sentinel_incident": {
+              "type": "ApiConnectionWebhook",
+              "inputs": {
+                "body": {
+                  "callback_url": "@{listCallbackUrl()}"
+                },
+                "host": {
+                  "connection": {
+                    "name": "@parameters('$connections')['azuresentinel']['connectionId']"
+                  }
+                },
+                "path": "/incident-creation"
+              }
+            }
+          },
+          "actions": {
+            "Send_an_email_(V2)": {
+              "type": "ApiConnection",
+              "inputs": {
+                "host": {
+                  "connection": {
+                    "name": "@parameters('$connections')['office365']['connectionId']"
+                  }
+                },
+                "method": "post",
+                "path": "/v2/Mail",
+                "body": {
+                  "To": "@parameters('socEmailAddress')",
+                  "Subject": "[BCDR] Replication mismatch detected - @{triggerBody()?['object']?['properties']?['title']}",
+                  "Body": "<p>The BCDR replication validation notebook detected one or more tables whose event counts do not match between the primary Microsoft Sentinel workspace and the federated Delta tables.</p><p><b>Incident:</b> @{triggerBody()?['object']?['properties']?['title']}<br><b>Severity:</b> @{triggerBody()?['object']?['properties']?['severity']}<br><b>Created (UTC):</b> @{triggerBody()?['object']?['properties']?['createdTimeUtc']}</p><p><b>Action required:</b> open the incident and review the mismatched tables.</p><p>To see the mismatched tables, run this query in Logs:</p><p><code>ReplicationValidation_CL | where TimeGenerated &gt; ago(1d) | where Mismatch == true | project TimeGenerated, Table, NumEventsInPrimaryWorkspace, NumEventsInParquetFiles, GapPercentage</code></p><p><a href=\"@{triggerBody()?['object']?['properties']?['incidentUrl']}\">Open the incident in the Microsoft Defender portal</a></p>",
+                  "Importance": "Normal"
+                }
+              }
+            }
+          },
+          "outputs": {}
+        },
+        "parameters": {
+          "$connections": {
+            "value": {
+              "office365": {
+                "connectionId": "[variables('office365ConnectionId')]",
+                "connectionName": "[parameters('office365ConnectionName')]",
+                "id": "[variables('office365ApiId')]"
+              },
+              "azuresentinel": {
+                "connectionId": "[variables('sentinelConnectionId')]",
+                "connectionName": "[parameters('sentinelConnectionName')]",
+                "id": "[variables('sentinelApiId')]",
+                "connectionProperties": {
+                  "authentication": {
+                    "type": "ManagedServiceIdentity"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-02-01",
+      "name": "[concat(parameters('sentinelWorkspaceName'), '/Microsoft.SecurityInsights/', variables('analyticRuleId'))]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "BCDR replication mismatch (Active/Passive)",
+        "description": "Raises an Informational alert when the daily BCDR replication validation notebook records one or more tables whose event counts do not match between the primary Sentinel workspace and the federated Delta tables.",
+        "severity": "Informational",
+        "enabled": true,
+        "query": "[concat(parameters('resultTableName'), '\n| where TimeGenerated > ago(1d)\n| where Mismatch == true\n| project TimeGenerated, Table, NumEventsInPrimaryWorkspace, NumEventsInParquetFiles, GapPercentage, WindowStartUtc, WindowEndUtc')]",
+        "queryFrequency": "P1D",
+        "queryPeriod": "P1D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "P1D",
+            "matchingMethod": "AnyAlert"
+          }
+        },
+        "eventGroupingSettings": {
+          "aggregationKind": "AlertPerResult"
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/automationRules",
+      "apiVersion": "2023-02-01",
+      "name": "[concat(parameters('sentinelWorkspaceName'), '/Microsoft.SecurityInsights/', variables('automationRuleId'))]",
+      "dependsOn": [
+        "[variables('playbookResourceId')]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/alertRules', parameters('sentinelWorkspaceName'), 'Microsoft.SecurityInsights', variables('analyticRuleId'))]"
+      ],
+      "properties": {
+        "displayName": "BCDR replication mismatch - email SOC",
+        "order": 1,
+        "triggeringLogic": {
+          "isEnabled": true,
+          "triggersOn": "Incidents",
+          "triggersWhen": "Created",
+          "conditions": [
+            {
+              "conditionType": "Property",
+              "conditionProperties": {
+                "propertyName": "IncidentRelatedAnalyticRuleIds",
+                "operator": "Contains",
+                "propertyValues": [
+                  "[variables('analyticRuleId')]"
+                ]
+              }
+            }
+          ]
+        },
+        "actions": [
+          {
+            "order": 1,
+            "actionType": "RunPlaybook",
+            "actionConfiguration": {
+              "logicAppResourceId": "[variables('playbookResourceId')]",
+              "tenantId": "[subscription().tenantId]"
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "outputs": {
+    "playbookResourceId": {
+      "type": "string",
+      "value": "[variables('playbookResourceId')]"
+    },
+    "playbookManagedIdentityPrincipalId": {
+      "type": "string",
+      "value": "[reference(variables('playbookResourceId'), '2019-05-01', 'full').identity.principalId]"
+    },
+    "office365ConnectionName": {
+      "type": "string",
+      "value": "[parameters('office365ConnectionName')]"
+    },
+    "sentinelConnectionName": {
+      "type": "string",
+      "value": "[parameters('sentinelConnectionName')]"
+    }
+  }
+}

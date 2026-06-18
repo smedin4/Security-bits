@@ -125,13 +125,6 @@
         "description": "Optional comma-separated list of source container names to process. Leave empty to process all containers matching sourceContainerPrefix. Use this to test the pipeline on a small subset of tables before running it for everything, for example am-signinlogs,am-microsoftgraphactivitylogs."
       }
     },
-    "enableNativeTypes": {
-      "type": "bool",
-      "defaultValue": true,
-      "metadata": {
-        "description": "Cast columns to their native types (long, double, boolean, timestamp) on export, using the per-table column map produced by pl_refresh_table_schemas (_schemas/workspace-schemas.json). Default true. The discovery pipeline refreshes the schema map immediately before each export run, so newly added tables are typed correctly from their first export. Set to false to fall back to the all-string export. Switching an already-exported table between string and native types is an incompatible Delta schema change, so empty its Delta folder when you change this for existing tables. When true, the Data Factory managed identity needs Reader on the Log Analytics workspace."
-      }
-    },
     "enableTrigger": {
       "type": "bool",
       "defaultValue": false,
@@ -389,20 +382,21 @@
     {
       "type": "Microsoft.DataFactory/factories/dataflows",
       "apiVersion": "2018-06-01",
-      "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'df_json_to_delta')]",
+      "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'df_seed_table_schema')]",
       "properties": {
         "type": "MappingDataFlow",
-        "description": "Generic JSON-lines to Delta conversion with schema drift. Complex columns (JSON objects/arrays from Log Analytics dynamic columns) are serialized to string so the Delta schema stays stable across hours; every column is written as string. Validate in a Data Factory Studio debug session before relying on it in production.",
+        "description": "Schema-authoritative seed. Builds the full declared schema for one table from the workspace Tables API dump (_raw/workspace-tables.json), types the columns the same way as df_json_to_delta_native, and writes a 0-row Delta commit. This guarantees every federated table always carries every declared column - correctly typed - even on hours with no data, and that the schema grows automatically when the workspace gains columns (add-only; mergeSchema never drops columns). Runs before the data export in pl_export_container_window_delta. CRITICAL: validate in a Data Factory Studio debug session before production - in particular confirm the runtime (lateral) Pivot generates the expected columns and that the 0-row Delta sink commit evolves the table schema.",
         "annotations": [
           "sentinel-bcdr",
-          "delta"
+          "delta",
+          "schema-seed"
         ],
         "typeProperties": {
           "sources": [
             {
-              "name": "SourceJson",
+              "name": "RawSchemas",
               "linkedService": {
-                "referenceName": "ls_source_monitor_export_blob",
+                "referenceName": "ls_target_bcdr_adlsgen2",
                 "type": "LinkedServiceReference"
               }
             }
@@ -418,31 +412,91 @@
           ],
           "transformations": [
             {
-              "name": "StringifyComplex"
+              "name": "FlattenCols"
+            },
+            {
+              "name": "ToKey"
+            },
+            {
+              "name": "FilterTable"
+            },
+            {
+              "name": "Pivoted"
+            },
+            {
+              "name": "StringifyDynamic"
+            },
+            {
+              "name": "CastLong"
+            },
+            {
+              "name": "CastDouble"
+            },
+            {
+              "name": "CastBool"
+            },
+            {
+              "name": "CastTs"
             },
             {
               "name": "AddMeta"
+            },
+            {
+              "name": "DropGroup"
+            },
+            {
+              "name": "EmptyOut"
             }
           ],
           "scriptLines": [
             "parameters{",
-            "\tcontainerName as string,",
-            "\tsourceFolderPath as string,",
-            "\tsourceFilePattern as string,",
             "\ttargetFileSystem as string,",
-            "\ttargetFolder as string",
+            "\ttargetFolder as string,",
+            "\tmetadataFileSystem as string,",
+            "\trawFileName as string,",
+            "\tdynamicColsCsv as string,",
+            "\tlongColsCsv as string,",
+            "\tdoubleColsCsv as string,",
+            "\tboolColsCsv as string,",
+            "\ttsColsCsv as string",
             "}",
-            "source(allowSchemaDrift: true,",
+            "source(output(",
+            "\t\tvalue as (properties as (schema as (name as string, standardColumns as (name as string, type as string)[])))[]",
+            "\t),",
+            "\tallowSchemaDrift: false,",
             "\tvalidateSchema: false,",
-            "\tinferDriftedColumnTypes: false,",
-            "\tignoreNoFilesFound: true,",
+            "\tignoreNoFilesFound: false,",
             "\tformat: 'json',",
-            "\tcontainer: ($containerName),",
-            "\twildcardPaths: [(concat($sourceFolderPath, '/**/', $sourceFilePattern))],",
-            "\tdocumentForm: 'documentPerLine') ~> SourceJson",
-            "SourceJson derive(each(match(type == 'complex' || type == 'array' || type == 'map'), $$ = toString($$))) ~> StringifyComplex",
-            "StringifyComplex derive(IngestedUtc = currentUTC()) ~> AddMeta",
-            "AddMeta sink(allowSchemaDrift: true,",
+            "\tfileSystem: ($metadataFileSystem),",
+            "\tfolderPath: '_raw',",
+            "\tfileName: ($rawFileName),",
+            "\tdocumentForm: 'singleDocument') ~> RawSchemas",
+            "RawSchemas foldDown(unroll(value.properties.schema.standardColumns, value),",
+            "\tmapColumn(",
+            "\t\ttableName = value.properties.schema.name,",
+            "\t\tcolName = value.properties.schema.standardColumns.name,",
+            "\t\tlaType = value.properties.schema.standardColumns.type",
+            "\t),",
+            "\tskipDuplicateMapInputs: true,",
+            "\tskipDuplicateMapOutputs: true) ~> FlattenCols",
+            "FlattenCols derive(tableKey = lower(tableName)) ~> ToKey",
+            "ToKey filter(tableKey == $targetFolder) ~> FilterTable",
+            "FilterTable pivot(groupBy(_g = 1),",
+            "\tpivotBy(colName),",
+            "\t{seedVal} = first(toString('')),",
+            "\tcolumnNaming: '$V',",
+            "\tlateral: true) ~> Pivoted",
+            "Pivoted derive(each(match(instr(',' + $dynamicColsCsv + ',', ',' + name + ',') > 0), $$ = toString($$))) ~> StringifyDynamic",
+            "StringifyDynamic derive(each(match(instr(',' + $longColsCsv + ',', ',' + name + ',') > 0), $$ = toLong($$))) ~> CastLong",
+            "CastLong derive(each(match(instr(',' + $doubleColsCsv + ',', ',' + name + ',') > 0), $$ = toDouble($$))) ~> CastDouble",
+            "CastDouble derive(each(match(instr(',' + $boolColsCsv + ',', ',' + name + ',') > 0), $$ = toBoolean($$))) ~> CastBool",
+            "CastBool derive(each(match(instr(',' + $tsColsCsv + ',', ',' + name + ',') > 0), $$ = coalesce(toTimestamp(replace(left($$, 23), 'T', ' '), 'yyyy-MM-dd HH:mm:ss.SSS', 'UTC'), toTimestamp(replace(left($$, 19), 'T', ' '), 'yyyy-MM-dd HH:mm:ss', 'UTC')))) ~> CastTs",
+            "CastTs derive(IngestedUtc = currentUTC()) ~> AddMeta",
+            "AddMeta select(skipDuplicateMapInputs: true,",
+            "\tskipDuplicateMapOutputs: true,",
+            "\teach(match(name != '_g'), $$ = $$)) ~> DropGroup",
+            "DropGroup filter(false()) ~> EmptyOut",
+            "EmptyOut sink(allowSchemaDrift: true,",
             "\tvalidateSchema: false,",
             "\tformat: 'delta',",
             "\tfileSystem: ($targetFileSystem),",
@@ -461,7 +515,6 @@
       },
       "dependsOn": [
         "[resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName'))]",
-        "[resourceId('Microsoft.DataFactory/factories/linkedservices', parameters('dataFactoryName'), 'ls_source_monitor_export_blob')]",
         "[resourceId('Microsoft.DataFactory/factories/linkedservices', parameters('dataFactoryName'), 'ls_target_bcdr_adlsgen2')]"
       ]
     },
@@ -471,7 +524,7 @@
       "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'df_json_to_delta_native')]",
       "properties": {
         "type": "MappingDataFlow",
-        "description": "Native-typed variant of df_json_to_delta. The workspace schema map supplies the declared dynamic columns, which are serialized to string first so the Delta schema stays stable across hours. Then the columns named in longColsCsv/doubleColsCsv/boolColsCsv/tsColsCsv are cast from string to long/double/boolean/timestamp before writing Delta; all other columns stay string. Timestamps are parsed as UTC and truncated to millisecond precision (Azure Monitor writes ISO 8601 with 7 fractional digits, which exceeds the millisecond limit of toTimestamp). When every CSV is empty and there are no dynamic columns the output is identical to the all-string df_json_to_delta. Only invoked when enableNativeTypes is true. Validate in a Data Factory Studio debug session before relying on it in production.",
+        "description": "Appends one container/window of Azure Monitor events to a Delta table with native column types. The workspace schema map supplies the declared dynamic columns, which are serialized to string first so the Delta schema stays stable across hours. Then the columns named in longColsCsv/doubleColsCsv/boolColsCsv/tsColsCsv are cast from string to long/double/boolean/timestamp before writing Delta; all other columns stay string. Timestamps are parsed as UTC and truncated to millisecond precision (Azure Monitor writes ISO 8601 with 7 fractional digits, which exceeds the millisecond limit of toTimestamp). Runs after df_seed_table_schema, which has already stamped the full declared schema, so quiet hours and missing columns never collapse the table. Validate in a Data Factory Studio debug session before relying on it in production.",
         "annotations": [
           "sentinel-bcdr",
           "delta"
@@ -659,7 +712,7 @@
       "apiVersion": "2018-06-01",
       "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'pl_export_container_window_delta')]",
       "properties": {
-        "description": "Export one Azure Monitor container/window to a Delta table. When enableNativeTypes is true (default) it looks up the table's column-type map in _schemas/workspace-schemas.json and uses df_json_to_delta_native to cast the listed columns to native types and stringify dynamic columns. When false it uses the all-string df_json_to_delta data flow. Validate in Studio before scheduling.",
+        "description": "Export one Azure Monitor container/window to a Delta table. First runs df_seed_table_schema to stamp the table's full declared schema (every column, correctly typed) from _raw/workspace-tables.json so the table always carries its complete schema even on hours with no data, then runs df_json_to_delta_native to append the window's events. Native typing is always on. Validate in Studio before scheduling.",
         "parameters": {
           "containerName": {
             "type": "String"
@@ -694,10 +747,6 @@
             "type": "Bool",
             "defaultValue": false
           },
-          "enableNativeTypes": {
-            "type": "Bool",
-            "defaultValue": true
-          },
           "metadataFileSystem": {
             "type": "String",
             "defaultValue": "sentinel-bcdr"
@@ -730,8 +779,8 @@
             }
           },
           {
-            "name": "RouteByNativeFlag",
-            "type": "IfCondition",
+            "name": "LookupSchema",
+            "type": "Lookup",
             "dependsOn": [
               {
                 "activity": "SetTargetFolder",
@@ -740,137 +789,133 @@
                 ]
               }
             ],
+            "policy": {
+              "timeout": "0.00:10:00",
+              "retry": 1,
+              "retryIntervalInSeconds": 30,
+              "secureOutput": false,
+              "secureInput": false
+            },
             "typeProperties": {
-              "expression": {
-                "value": "@pipeline().parameters.enableNativeTypes",
-                "type": "Expression"
+              "source": {
+                "type": "JsonSource",
+                "storeSettings": {
+                  "type": "AzureBlobFSReadSettings",
+                  "recursive": false,
+                  "enablePartitionDiscovery": false
+                },
+                "formatSettings": {
+                  "type": "JsonReadSettings"
+                }
               },
-              "ifFalseActivities": [
-                {
-                  "name": "WriteDeltaTableAllString",
-                  "type": "ExecuteDataFlow",
-                  "dependsOn": [],
-                  "policy": {
-                    "timeout": "7.00:00:00",
-                    "retry": 1,
-                    "retryIntervalInSeconds": 120,
-                    "secureOutput": false,
-                    "secureInput": false
-                  },
-                  "typeProperties": {
-                    "dataflow": {
-                      "referenceName": "df_json_to_delta",
-                      "type": "DataFlowReference",
-                      "parameters": {
-                        "containerName": "'@{pipeline().parameters.containerName}'",
-                        "sourceFolderPath": "'@{if(empty(pipeline().parameters.sourceWorkspaceResourceId), pipeline().parameters.sourceFolderPath, concat('WorkspaceResourceId=', pipeline().parameters.sourceWorkspaceResourceId, '/y=', formatDateTime(pipeline().parameters.modifiedAfterUtc, 'yyyy'), '/m=', formatDateTime(pipeline().parameters.modifiedAfterUtc, 'MM'), '/d=', formatDateTime(pipeline().parameters.modifiedAfterUtc, 'dd'), '/h=', formatDateTime(pipeline().parameters.modifiedAfterUtc, 'HH')))}'",
-                        "sourceFilePattern": "'@{pipeline().parameters.sourceFilePattern}'",
-                        "targetFileSystem": "'@{pipeline().parameters.targetFileSystem}'",
-                        "targetFolder": "'@{variables('targetFolder')}'"
-                      }
-                    },
-                    "integrationRuntime": {
-                      "referenceName": "ir-dataflow-warm",
-                      "type": "IntegrationRuntimeReference"
-                    },
-                    "traceLevel": "@if(pipeline().parameters.dataFlowDebugLogging, 'Fine', 'None')"
-                  }
+              "dataset": {
+                "referenceName": "ds_schemas_json",
+                "type": "DatasetReference",
+                "parameters": {
+                  "fileSystem": "@pipeline().parameters.metadataFileSystem",
+                  "fileName": "@pipeline().parameters.schemaFileName"
                 }
-              ],
-              "ifTrueActivities": [
-                {
-                  "name": "LookupSchema",
-                  "type": "Lookup",
-                  "dependsOn": [],
-                  "policy": {
-                    "timeout": "0.00:10:00",
-                    "retry": 1,
-                    "retryIntervalInSeconds": 30,
-                    "secureOutput": false,
-                    "secureInput": false
-                  },
-                  "typeProperties": {
-                    "source": {
-                      "type": "JsonSource",
-                      "storeSettings": {
-                        "type": "AzureBlobFSReadSettings",
-                        "recursive": false,
-                        "enablePartitionDiscovery": false
-                      },
-                      "formatSettings": {
-                        "type": "JsonReadSettings"
-                      }
-                    },
-                    "dataset": {
-                      "referenceName": "ds_schemas_json",
-                      "type": "DatasetReference",
-                      "parameters": {
-                        "fileSystem": "@pipeline().parameters.metadataFileSystem",
-                        "fileName": "@pipeline().parameters.schemaFileName"
-                      }
-                    },
-                    "firstRowOnly": false
-                  }
-                },
-                {
-                  "name": "FilterSchema",
-                  "type": "Filter",
-                  "dependsOn": [
-                    {
-                      "activity": "LookupSchema",
-                      "dependencyConditions": [
-                        "Succeeded"
-                      ]
-                    }
-                  ],
-                  "typeProperties": {
-                    "items": "@activity('LookupSchema').output.value",
-                    "condition": "@equals(item().tableKey, variables('targetFolder'))"
-                  }
-                },
-                {
-                  "name": "WriteDeltaTableNative",
-                  "type": "ExecuteDataFlow",
-                  "dependsOn": [
-                    {
-                      "activity": "FilterSchema",
-                      "dependencyConditions": [
-                        "Succeeded"
-                      ]
-                    }
-                  ],
-                  "policy": {
-                    "timeout": "7.00:00:00",
-                    "retry": 1,
-                    "retryIntervalInSeconds": 120,
-                    "secureOutput": false,
-                    "secureInput": false
-                  },
-                  "typeProperties": {
-                    "dataflow": {
-                      "referenceName": "df_json_to_delta_native",
-                      "type": "DataFlowReference",
-                      "parameters": {
-                        "containerName": "'@{pipeline().parameters.containerName}'",
-                        "sourceFolderPath": "'@{if(empty(pipeline().parameters.sourceWorkspaceResourceId), pipeline().parameters.sourceFolderPath, concat('WorkspaceResourceId=', pipeline().parameters.sourceWorkspaceResourceId, '/y=', formatDateTime(pipeline().parameters.modifiedAfterUtc, 'yyyy'), '/m=', formatDateTime(pipeline().parameters.modifiedAfterUtc, 'MM'), '/d=', formatDateTime(pipeline().parameters.modifiedAfterUtc, 'dd'), '/h=', formatDateTime(pipeline().parameters.modifiedAfterUtc, 'HH')))}'",
-                        "sourceFilePattern": "'@{pipeline().parameters.sourceFilePattern}'",
-                        "targetFileSystem": "'@{pipeline().parameters.targetFileSystem}'",
-                        "targetFolder": "'@{variables('targetFolder')}'",
-                        "dynamicColsCsv": "'@{if(empty(activity('FilterSchema').output.value), '', join(activity('FilterSchema').output.value[0].dynamicCols, ','))}'",
-                        "longColsCsv": "'@{if(empty(activity('FilterSchema').output.value), '', join(activity('FilterSchema').output.value[0].longCols, ','))}'",
-                        "doubleColsCsv": "'@{if(empty(activity('FilterSchema').output.value), '', join(activity('FilterSchema').output.value[0].doubleCols, ','))}'",
-                        "boolColsCsv": "'@{if(empty(activity('FilterSchema').output.value), '', join(activity('FilterSchema').output.value[0].boolCols, ','))}'",
-                        "tsColsCsv": "'@{if(empty(activity('FilterSchema').output.value), '', join(activity('FilterSchema').output.value[0].tsCols, ','))}'"
-                      }
-                    },
-                    "integrationRuntime": {
-                      "referenceName": "ir-dataflow-warm",
-                      "type": "IntegrationRuntimeReference"
-                    },
-                    "traceLevel": "@if(pipeline().parameters.dataFlowDebugLogging, 'Fine', 'None')"
-                  }
+              },
+              "firstRowOnly": false
+            }
+          },
+          {
+            "name": "FilterSchema",
+            "type": "Filter",
+            "dependsOn": [
+              {
+                "activity": "LookupSchema",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "typeProperties": {
+              "items": "@activity('LookupSchema').output.value",
+              "condition": "@equals(item().tableKey, variables('targetFolder'))"
+            }
+          },
+          {
+            "name": "SeedSchema",
+            "type": "ExecuteDataFlow",
+            "dependsOn": [
+              {
+                "activity": "FilterSchema",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "policy": {
+              "timeout": "1.00:00:00",
+              "retry": 1,
+              "retryIntervalInSeconds": 120,
+              "secureOutput": false,
+              "secureInput": false
+            },
+            "typeProperties": {
+              "dataflow": {
+                "referenceName": "df_seed_table_schema",
+                "type": "DataFlowReference",
+                "parameters": {
+                  "targetFileSystem": "'@{pipeline().parameters.targetFileSystem}'",
+                  "targetFolder": "'@{variables('targetFolder')}'",
+                  "metadataFileSystem": "'@{pipeline().parameters.metadataFileSystem}'",
+                  "rawFileName": "'workspace-tables.json'",
+                  "dynamicColsCsv": "'@{if(empty(activity('FilterSchema').output.value), '', join(activity('FilterSchema').output.value[0].dynamicCols, ','))}'",
+                  "longColsCsv": "'@{if(empty(activity('FilterSchema').output.value), '', join(activity('FilterSchema').output.value[0].longCols, ','))}'",
+                  "doubleColsCsv": "'@{if(empty(activity('FilterSchema').output.value), '', join(activity('FilterSchema').output.value[0].doubleCols, ','))}'",
+                  "boolColsCsv": "'@{if(empty(activity('FilterSchema').output.value), '', join(activity('FilterSchema').output.value[0].boolCols, ','))}'",
+                  "tsColsCsv": "'@{if(empty(activity('FilterSchema').output.value), '', join(activity('FilterSchema').output.value[0].tsCols, ','))}'"
                 }
-              ]
+              },
+              "integrationRuntime": {
+                "referenceName": "ir-dataflow-warm",
+                "type": "IntegrationRuntimeReference"
+              },
+              "traceLevel": "@if(pipeline().parameters.dataFlowDebugLogging, 'Fine', 'None')"
+            }
+          },
+          {
+            "name": "WriteDeltaTableNative",
+            "type": "ExecuteDataFlow",
+            "dependsOn": [
+              {
+                "activity": "SeedSchema",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "policy": {
+              "timeout": "7.00:00:00",
+              "retry": 1,
+              "retryIntervalInSeconds": 120,
+              "secureOutput": false,
+              "secureInput": false
+            },
+            "typeProperties": {
+              "dataflow": {
+                "referenceName": "df_json_to_delta_native",
+                "type": "DataFlowReference",
+                "parameters": {
+                  "containerName": "'@{pipeline().parameters.containerName}'",
+                  "sourceFolderPath": "'@{if(empty(pipeline().parameters.sourceWorkspaceResourceId), pipeline().parameters.sourceFolderPath, concat('WorkspaceResourceId=', pipeline().parameters.sourceWorkspaceResourceId, '/y=', formatDateTime(pipeline().parameters.modifiedAfterUtc, 'yyyy'), '/m=', formatDateTime(pipeline().parameters.modifiedAfterUtc, 'MM'), '/d=', formatDateTime(pipeline().parameters.modifiedAfterUtc, 'dd'), '/h=', formatDateTime(pipeline().parameters.modifiedAfterUtc, 'HH')))}'",
+                  "sourceFilePattern": "'@{pipeline().parameters.sourceFilePattern}'",
+                  "targetFileSystem": "'@{pipeline().parameters.targetFileSystem}'",
+                  "targetFolder": "'@{variables('targetFolder')}'",
+                  "dynamicColsCsv": "'@{if(empty(activity('FilterSchema').output.value), '', join(activity('FilterSchema').output.value[0].dynamicCols, ','))}'",
+                  "longColsCsv": "'@{if(empty(activity('FilterSchema').output.value), '', join(activity('FilterSchema').output.value[0].longCols, ','))}'",
+                  "doubleColsCsv": "'@{if(empty(activity('FilterSchema').output.value), '', join(activity('FilterSchema').output.value[0].doubleCols, ','))}'",
+                  "boolColsCsv": "'@{if(empty(activity('FilterSchema').output.value), '', join(activity('FilterSchema').output.value[0].boolCols, ','))}'",
+                  "tsColsCsv": "'@{if(empty(activity('FilterSchema').output.value), '', join(activity('FilterSchema').output.value[0].tsCols, ','))}'"
+                }
+              },
+              "integrationRuntime": {
+                "referenceName": "ir-dataflow-warm",
+                "type": "IntegrationRuntimeReference"
+              },
+              "traceLevel": "@if(pipeline().parameters.dataFlowDebugLogging, 'Fine', 'None')"
             }
           }
         ],
@@ -881,7 +926,7 @@
       },
       "dependsOn": [
         "[resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName'))]",
-        "[resourceId('Microsoft.DataFactory/factories/dataflows', parameters('dataFactoryName'), 'df_json_to_delta')]",
+        "[resourceId('Microsoft.DataFactory/factories/dataflows', parameters('dataFactoryName'), 'df_seed_table_schema')]",
         "[resourceId('Microsoft.DataFactory/factories/dataflows', parameters('dataFactoryName'), 'df_json_to_delta_native')]",
         "[resourceId('Microsoft.DataFactory/factories/datasets', parameters('dataFactoryName'), 'ds_schemas_json')]",
         "[resourceId('Microsoft.DataFactory/factories/integrationRuntimes', parameters('dataFactoryName'), 'ir-dataflow-warm')]"
@@ -892,7 +937,7 @@
       "apiVersion": "2018-06-01",
       "name": "[format('{0}/{1}', parameters('dataFactoryName'), 'pl_discover_and_export_azmon_to_delta')]",
       "properties": {
-        "description": "Refresh the workspace table schema, then discover matching Azure Monitor export containers through Azure Resource Manager and export the previous processing window to Delta tables. The first activity runs pl_refresh_table_schemas so the per-table column-type map is current before the export; if it fails the export does not run (hard stop). With enableNativeTypes true (default) columns are written as native types, otherwise as strings.",
+        "description": "Refresh the workspace table schema, then discover matching Azure Monitor export containers through Azure Resource Manager and export the previous processing window to Delta tables. The first activity runs pl_refresh_table_schemas so the per-table column-type map is current before the export; if it fails the export does not run (hard stop). Each table is schema-seeded (full declared schema, native-typed) before its events are appended.",
         "parameters": {
           "sourceStorageAccountResourceId": {
             "type": "String",
@@ -933,10 +978,6 @@
           "tableAllowList": {
             "type": "String",
             "defaultValue": "[parameters('tableAllowList')]"
-          },
-          "enableNativeTypes": {
-            "type": "Bool",
-            "defaultValue": "[parameters('enableNativeTypes')]"
           },
           "metadataFileSystem": {
             "type": "String",
@@ -1038,7 +1079,6 @@
                       "sourceWorkspaceResourceId": "@pipeline().parameters.sourceWorkspaceResourceId",
                       "targetFileSystem": "@pipeline().parameters.targetFileSystem",
                       "sourceContainerPrefix": "@pipeline().parameters.sourceContainerPrefix",
-                      "enableNativeTypes": "@pipeline().parameters.enableNativeTypes",
                       "metadataFileSystem": "@pipeline().parameters.metadataFileSystem"
                     }
                   }
@@ -1257,7 +1297,7 @@
     },
     "workspaceRoleRequired": {
       "type": "string",
-      "value": "Grant Reader to the Data Factory managed identity on the Log Analytics workspace. The hourly export refreshes the table schema (declared column types from the Azure Resource Manager Tables API, metadata only) before each run, so this role is required whenever enableNativeTypes is true (the default)."
+      "value": "Grant Reader to the Data Factory managed identity on the Log Analytics workspace. The hourly export refreshes the table schema (declared column types from the Azure Resource Manager Tables API, metadata only) before each run and uses it to seed and type every Delta table, so this role is required."
     }
   }
 }

@@ -47,9 +47,6 @@
     "tableAllowList": {
       "value": ""
     },
-    "enableNativeTypes": {
-      "value": true
-    },
     "metadataFileSystem": {
       "value": "sentinel-bcdr"
     },
